@@ -1,0 +1,33 @@
+apiVersion: core.krateo.io/v1alpha1
+kind: CompositionDefinition
+metadata:
+  annotations:
+    "krateo.io/connector-verbose": "true"
+  name: fireworksapp-remote
+  namespace: demo-system
+spec:
+  chart:
+    url: https://github.com/krateoplatformops/krateo-v2-template-fireworksapp/releases/download/0.1.0/fireworks-app-0.1.0.tgz
+  # Deploy the generated CRD, its RBAC and the composition-dynamic-controller into a
+  # REMOTE target cluster. The kubeconfig is read from a native Kubernetes Secret in the
+  # management cluster (here demo-system/prod-eu-kubeconfig, key "kubeconfig").
+  # Populate/rotate that Secret with External Secrets Operator.
+  deploy:
+    mode: Remote
+    kubeconfigRef:
+      name: prod-eu-kubeconfig
+      namespace: demo-system
+      key: kubeconfig
+---
+# Equivalent local deployment (the default). `deploy` may be omitted entirely;
+# `mode: Local` is shown here only for clarity.
+apiVersion: core.krateo.io/v1alpha1
+kind: CompositionDefinition
+metadata:
+  name: fireworksapp-local
+  namespace: demo-system
+spec:
+  chart:
+    url: https://github.com/krateoplatformops/krateo-v2-template-fireworksapp/releases/download/0.1.0/fireworks-app-0.1.0.tgz
+  deploy:
+    mode: Local

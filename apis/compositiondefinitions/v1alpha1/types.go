@@ -73,9 +73,47 @@ type ChartInfoProps struct {
 	// +optional
 	Credentials *Credentials `json:"credentials,omitempty"`
 }
+
+// DeploymentMode selects where the composition-dynamic-controller (and the
+// generated CRD and RBAC) are deployed.
+// +kubebuilder:validation:Enum=Local;Remote
+type DeploymentMode string
+
+const (
+	// DeploymentModeLocal deploys into the management cluster - the historical
+	// behaviour and the default when no deployment target is specified.
+	DeploymentModeLocal DeploymentMode = "Local"
+	// DeploymentModeRemote deploys into a remote target cluster addressed by
+	// KubeconfigRef.
+	DeploymentModeRemote DeploymentMode = "Remote"
+)
+
+// DeploymentTarget selects where the composition-dynamic-controller, the generated
+// CRD and its RBAC are deployed.
+// +kubebuilder:validation:XValidation:rule="self.mode != 'Remote' || has(self.kubeconfigRef)", message="kubeconfigRef is required when mode is Remote"
+type DeploymentTarget struct {
+	// Mode: Local (default) deploys into the management cluster; Remote deploys into
+	// the cluster addressed by KubeconfigRef.
+	// +kubebuilder:default=Local
+	// +optional
+	Mode DeploymentMode `json:"mode,omitempty"`
+
+	// KubeconfigRef: reference to a Kubernetes Secret key holding the kubeconfig of the
+	// remote target cluster. Required when Mode is Remote. The Secret is the credential
+	// rotation seam - populate and rotate it via External Secrets Operator.
+	// +optional
+	KubeconfigRef *rtv1.SecretKeySelector `json:"kubeconfigRef,omitempty"`
+}
+
 type CompositionDefinitionSpec struct {
 	// rtv1.ManagedSpec `json:",inline"`
 	Chart *ChartInfo `json:"chart,omitempty"`
+
+	// Deploy: selects whether the composition-dynamic-controller (and the generated
+	// CRD and RBAC) are deployed locally in the management cluster (the default) or to
+	// a remote target cluster. When omitted, deployment is local.
+	// +optional
+	Deploy *DeploymentTarget `json:"deploy,omitempty"`
 }
 
 type VersionDetail struct {

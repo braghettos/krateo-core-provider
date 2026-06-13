@@ -116,6 +116,45 @@ spec:
                   rule: '!has(oldSelf.version) || has(self.version)'
                 - message: Repo is required once set
                   rule: '!has(oldSelf.repo) || has(self.repo)'
+              deploy:
+                description: |-
+                  Deploy: selects whether the composition-dynamic-controller (and the generated
+                  CRD and RBAC) are deployed locally in the management cluster (the default) or to
+                  a remote target cluster. When omitted, deployment is local.
+                properties:
+                  kubeconfigRef:
+                    description: |-
+                      KubeconfigRef: reference to a Kubernetes Secret key holding the kubeconfig of the
+                      remote target cluster. Required when Mode is Remote. The Secret is the credential
+                      rotation seam - populate and rotate it via External Secrets Operator.
+                    properties:
+                      key:
+                        description: The key to select.
+                        type: string
+                      name:
+                        description: Name of the referenced object.
+                        type: string
+                      namespace:
+                        description: Namespace of the referenced object.
+                        type: string
+                    required:
+                    - key
+                    - name
+                    - namespace
+                    type: object
+                  mode:
+                    default: Local
+                    description: |-
+                      Mode: Local (default) deploys into the management cluster; Remote deploys
+                      into the cluster addressed by KubeconfigRef.
+                    enum:
+                    - Local
+                    - Remote
+                    type: string
+                type: object
+                x-kubernetes-validations:
+                - message: kubeconfigRef is required when mode is Remote
+                  rule: self.mode != 'Remote' || has(self.kubeconfigRef)
             type: object
           status:
             description: CompositionDefinitionStatus is the status of a CompositionDefinition.

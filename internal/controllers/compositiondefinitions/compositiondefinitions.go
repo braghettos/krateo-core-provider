@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"strings"
 	"time"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -34,6 +35,7 @@ import (
 	"github.com/krateoplatformops/core-provider/internal/controllers/compositiondefinitions/generator"
 	"github.com/krateoplatformops/core-provider/internal/tools"
 	"github.com/krateoplatformops/core-provider/internal/tools/chartfs"
+	"github.com/krateoplatformops/core-provider/internal/tools/clusterkube"
 	crdtools "github.com/krateoplatformops/core-provider/internal/tools/crd"
 	"github.com/krateoplatformops/core-provider/internal/tools/deploy"
 	"github.com/krateoplatformops/core-provider/internal/tools/deployment"
@@ -88,7 +90,12 @@ var (
 	cabundle                     = GetCABundle()
 	webhookServiceName           = env.GetEnvOrDefault("CORE_PROVIDER_WEBHOOK_SERVICE_NAME", "core-provider-webhook-service")
 	webhookServiceNamespace      = env.GetEnvOrDefault("CORE_PROVIDER_WEBHOOK_SERVICE_NAMESPACE", "default")
-	helmRegistryConfigPath       = env.GetEnvOrDefault(helmRegistryConfigPathEnvVar, chartfs.HelmRegistryConfigPathDefault)
+	// webhookURL, when set, is the externally reachable base URL of core-provider's
+	// conversion endpoint. It is required to enable multi-version conversion for CRDs
+	// deployed to remote target clusters, whose API servers cannot resolve the
+	// in-cluster webhook Service of the management cluster.
+	webhookURL             = env.GetEnvOrDefault("CORE_PROVIDER_WEBHOOK_URL", "")
+	helmRegistryConfigPath = env.GetEnvOrDefault(helmRegistryConfigPathEnvVar, chartfs.HelmRegistryConfigPathDefault)
 )
 
 func GetCABundle() []byte {
@@ -101,6 +108,69 @@ func GetCABundle() []byte {
 
 	return fb
 }
+
+// conversionStrategy describes how the conversion webhook was wired for a CRD.
+type conversionStrategy string
+
+const (
+	conversionService conversionStrategy = "service" // in-cluster webhook Service (local target)
+	conversionURL     conversionStrategy = "url"     // externally reachable URL (remote target)
+	conversionNone    conversionStrategy = "none"    // no conversion (remote target, no URL configured)
+)
+
+// conversionConfFor builds the CRD conversion configuration for the cluster the CRD is
+// being deployed to.
+//
+//   - local target  -> WebhookConverter via the in-cluster webhook Service.
+//   - remote target -> WebhookConverter via CORE_PROVIDER_WEBHOOK_URL when set, so the
+//     remote API server can reach the management cluster's conversion endpoint.
+//   - remote target without a URL -> NoneConverter. A Service-based webhook would be
+//     unreachable from the remote API server and would break every request that needs
+//     conversion; skipping conversion is strictly safer. The caller should warn.
+func conversionConfFor(remote bool) (*apiextensionsv1.CustomResourceConversion, conversionStrategy) {
+	whport := int32(9443)
+	whpath := "/convert"
+	reviewVersions := []string{"v1", "v1alpha1", "v1alpha2"}
+
+	if remote {
+		if webhookURL == "" {
+			return &apiextensionsv1.CustomResourceConversion{
+				Strategy: apiextensionsv1.NoneConverter,
+			}, conversionNone
+		}
+		url := strings.TrimRight(webhookURL, "/")
+		if !strings.HasSuffix(url, whpath) {
+			url += whpath
+		}
+		return &apiextensionsv1.CustomResourceConversion{
+			Strategy: apiextensionsv1.WebhookConverter,
+			Webhook: &apiextensionsv1.WebhookConversion{
+				ConversionReviewVersions: reviewVersions,
+				ClientConfig: &apiextensionsv1.WebhookClientConfig{
+					URL:      &url,
+					CABundle: cabundle,
+				},
+			},
+		}, conversionURL
+	}
+
+	return &apiextensionsv1.CustomResourceConversion{
+		Strategy: apiextensionsv1.WebhookConverter,
+		Webhook: &apiextensionsv1.WebhookConversion{
+			ConversionReviewVersions: reviewVersions,
+			ClientConfig: &apiextensionsv1.WebhookClientConfig{
+				Service: &apiextensionsv1.ServiceReference{
+					Namespace: webhookServiceNamespace,
+					Name:      webhookServiceName,
+					Port:      &whport,
+					Path:      &whpath,
+				},
+				CABundle: cabundle,
+			},
+		},
+	}, conversionService
+}
+
 func Setup(mgr ctrl.Manager, o controller.Options) error {
 	_ = apiextensionsscheme.AddToScheme(clientsetscheme.Scheme)
 
@@ -148,7 +218,7 @@ type connector struct {
 }
 
 func (c *connector) Connect(ctx context.Context, mg resource.Managed) (reconciler.ExternalClient, error) {
-	_, ok := mg.(*compositiondefinitionsv1alpha1.CompositionDefinition)
+	cr, ok := mg.(*compositiondefinitionsv1alpha1.CompositionDefinition)
 	if !ok {
 		return nil, errors.New(errNotCR)
 	}
@@ -159,16 +229,43 @@ func (c *connector) Connect(ctx context.Context, mg resource.Managed) (reconcile
 		log.SetOutput(io.Discard)
 	}
 
-	return &external{
+	ext := &external{
+		mgmt:      c.kube,
 		kube:      c.kube,
-		log:       c.log,
 		dynamic:   c.dynamic,
 		discovery: c.discovery,
+		log:       c.log,
 		rec:       c.recorder,
-	}, nil
+	}
+
+	// When the CompositionDefinition targets a remote cluster, the generated CRD, its
+	// RBAC and the composition-dynamic-controller are deployed there. The
+	// CompositionDefinition resource and its referenced secrets stay in the management
+	// cluster, so mgmt keeps pointing at the local cluster.
+	if clusterkube.IsRemote(cr.Spec.Deploy) {
+		tc, err := clusterkube.Remote(ctx, c.kube, cr.Spec.Deploy)
+		if err != nil {
+			return nil, err
+		}
+		ext.kube = tc.Kube
+		ext.dynamic = tc.Dynamic
+		ext.discovery = tc.Discovery
+		if meta.IsVerbose(cr) {
+			c.log.Debug("Deploying to remote target cluster",
+				"host", tc.Config.Host, "name", cr.Name)
+		}
+	}
+
+	return ext, nil
 }
 
 type external struct {
+	// mgmt is the management-cluster client: it holds the CompositionDefinition
+	// resource, the chart/credentials secrets, and is where status is persisted.
+	mgmt client.Client
+	// kube, dynamic and discovery target the cluster where the generated CRD, RBAC and
+	// the composition-dynamic-controller are deployed (local == mgmt, or a remote
+	// target cluster).
 	discovery discovery.DiscoveryInterface
 	dynamic   dynamic.Interface
 	kube      client.Client
@@ -189,7 +286,7 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 		}, e.Delete(ctx, cr)
 	}
 
-	pkg, err := chartfs.ForSpec(ctx, e.kube, cr.Spec.Chart)
+	pkg, err := chartfs.ForSpec(ctx, e.mgmt, cr.Spec.Chart)
 	if err != nil {
 		return reconciler.ExternalObservation{}, err
 	}
@@ -311,7 +408,7 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) error {
 		return nil
 	}
 
-	pkg, dir, err := generator.ChartInfoFromSpec(ctx, e.kube, cr.Spec.Chart)
+	pkg, dir, err := generator.ChartInfoFromSpec(ctx, e.mgmt, cr.Spec.Chart)
 	if err != nil {
 		return err
 	}
@@ -373,24 +470,15 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) error {
 			return err
 		}
 
-		whport := int32(9443)
-		whpath := "/convert"
+		remote := clusterkube.IsRemote(cr.Spec.Deploy)
+		conv, strategy := conversionConfFor(remote)
+		if strategy == conversionNone {
+			e.log.Info("Multi-version conversion disabled for remote target: the remote API server cannot reach the management webhook Service. "+
+				"Set CORE_PROVIDER_WEBHOOK_URL to an externally reachable /convert endpoint to enable conversion.",
+				"gvr", gvr.String(), "name", cr.Name)
+		}
 
-		crd = crdtools.ConversionConf(*crd, &apiextensionsv1.CustomResourceConversion{
-			Strategy: apiextensionsv1.WebhookConverter,
-			Webhook: &apiextensionsv1.WebhookConversion{
-				ConversionReviewVersions: []string{"v1", "v1alpha1", "v1alpha2"},
-				ClientConfig: &apiextensionsv1.WebhookClientConfig{
-					Service: &apiextensionsv1.ServiceReference{
-						Namespace: webhookServiceNamespace,
-						Name:      webhookServiceName,
-						Port:      &whport,
-						Path:      &whpath,
-					},
-					CABundle: cabundle,
-				},
-			},
-		})
+		crd = crdtools.ConversionConf(*crd, conv)
 		return crdtools.Update(ctx, e.kube, crd.Name, crd)
 	} else {
 		crd, err = crdtools.Get(ctx, e.kube, gvr)
@@ -443,7 +531,7 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) error {
 		return err
 	}
 
-	err = e.kube.Status().Update(ctx, cr)
+	err = e.mgmt.Status().Update(ctx, cr)
 	if err != nil {
 		return err
 	}
@@ -473,7 +561,7 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 		e.log.Debug("Updating CompositionDefinition", "name", cr.Name)
 	}
 
-	pkg, dir, err := generator.ChartInfoFromSpec(ctx, e.kube, cr.Spec.Chart)
+	pkg, dir, err := generator.ChartInfoFromSpec(ctx, e.mgmt, cr.Spec.Chart)
 	if err != nil {
 		return err
 	}
@@ -550,7 +638,7 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 
 	cr.Status.ApiVersion, cr.Status.Kind = gvk.ToAPIVersionAndKind()
 
-	err = e.kube.Status().Update(ctx, cr)
+	err = e.mgmt.Status().Update(ctx, cr)
 	if err != nil {
 		return err
 	}
@@ -571,7 +659,7 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
 		return nil
 	}
 
-	pkg, dir, err := generator.ChartInfoFromSpec(ctx, e.kube, cr.Spec.Chart)
+	pkg, dir, err := generator.ChartInfoFromSpec(ctx, e.mgmt, cr.Spec.Chart)
 	if err != nil {
 		return err
 	}
@@ -584,7 +672,7 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
 	gvr := tools.ToGroupVersionResource(gvk)
 
 	var skipCRD bool
-	lst, err := getCompositionDefinitions(ctx, e.kube, gvk)
+	lst, err := getCompositionDefinitions(ctx, e.mgmt, gvk)
 	if err != nil {
 		e.log.Debug("Error getting CompositionDefinitions", "error", err)
 		return fmt.Errorf("error getting CompositionDefinitions: %w", err)
@@ -615,7 +703,7 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
 			if !meta.FinalizerExists(cr, compositionStillExistFinalizer) {
 				e.log.Debug("Adding finalizer to CompositionDefinition", "name", cr.Name)
 				meta.AddFinalizer(cr, compositionStillExistFinalizer)
-				err = e.kube.Update(ctx, cr)
+				err = e.mgmt.Update(ctx, cr)
 				if err != nil {
 					return err
 				}
@@ -624,5 +712,5 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
 	}
 
 	meta.RemoveFinalizer(cr, compositionStillExistFinalizer)
-	return e.kube.Update(ctx, cr)
+	return e.mgmt.Update(ctx, cr)
 }
