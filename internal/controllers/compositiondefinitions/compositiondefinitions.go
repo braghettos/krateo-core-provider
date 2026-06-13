@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -22,6 +23,8 @@ import (
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
@@ -205,8 +208,57 @@ func Setup(mgr ctrl.Manager, o controller.Options) error {
 		Named(name).
 		WithOptions(o.ForControllerRuntime()).
 		For(&compositiondefinitionsv1alpha1.CompositionDefinition{}).
+		// Re-reconcile a CompositionDefinition when a Secret it references changes, so
+		// credentials rotated out-of-band (e.g. by External Secrets Operator) are picked
+		// up promptly instead of waiting for the next poll.
+		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(enqueueForReferencedSecret(cli))).
 		Complete(ratelimiter.New(name, r, o.GlobalRateLimiter))
 
+}
+
+// enqueueForReferencedSecret maps a Secret event to reconcile requests for every
+// CompositionDefinition that references it (kubeconfig for a remote target, or chart
+// repository credentials).
+func enqueueForReferencedSecret(cli client.Client) handler.MapFunc {
+	return func(ctx context.Context, obj client.Object) []reconcile.Request {
+		secret, ok := obj.(*corev1.Secret)
+		if !ok {
+			return nil
+		}
+
+		var list compositiondefinitionsv1alpha1.CompositionDefinitionList
+		if err := cli.List(ctx, &list); err != nil {
+			return nil
+		}
+
+		var reqs []reconcile.Request
+		for i := range list.Items {
+			cd := &list.Items[i]
+			if compositionReferencesSecret(cd, secret.Namespace, secret.Name) {
+				reqs = append(reqs, reconcile.Request{NamespacedName: types.NamespacedName{
+					Namespace: cd.Namespace,
+					Name:      cd.Name,
+				}})
+			}
+		}
+		return reqs
+	}
+}
+
+// compositionReferencesSecret reports whether cd references the Secret ns/name, either
+// as its remote-target kubeconfig or as its chart repository credentials.
+func compositionReferencesSecret(cd *compositiondefinitionsv1alpha1.CompositionDefinition, ns, name string) bool {
+	if d := cd.Spec.Deploy; d != nil && d.KubeconfigRef != nil {
+		if d.KubeconfigRef.Namespace == ns && d.KubeconfigRef.Name == name {
+			return true
+		}
+	}
+	if c := cd.Spec.Chart; c != nil && c.Credentials != nil {
+		if c.Credentials.PasswordRef.Namespace == ns && c.Credentials.PasswordRef.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 type connector struct {

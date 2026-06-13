@@ -242,10 +242,14 @@ secret managers, etc.) into the `Secret` referenced by a `KubernetesTarget`.
 Requirements this imposes on our code:
 
 - **Read on every reconcile** (don't cache the kubeconfig across reconciles); pick up
-  ESO-rotated values automatically.
-- **Watch the referenced Secret** and enqueue the owning `KubernetesTarget` /
-  `CompositionDefinition` on change, so a rotation triggers prompt re-validation (rather
-  than waiting for the next poll). Record `status.lastObservedSecretVersion`.
+  ESO-rotated values automatically. ✅ *Implemented* — `clusterkube.Remote` reads the
+  Secret each `Connect()`.
+- **Watch the referenced Secret** and enqueue the owning `CompositionDefinition` on
+  change, so a rotation triggers prompt re-validation (rather than waiting for the next
+  poll). ✅ *Implemented* — the controller `.Watches(&corev1.Secret{}, …)` mapping a
+  Secret event to every CompositionDefinition referencing it (kubeconfig or chart creds).
+  See the ESO recipes in [`../how-to/remote-target-credentials.md`](../how-to/remote-target-credentials.md).
+  (`status.lastObservedSecretVersion` still TODO.)
 - **Tolerate brief auth failures** around a rotation boundary (retry/backoff, surface
   `connectionStatus: Down` only after a threshold) — ESO updates are eventually
   consistent.
