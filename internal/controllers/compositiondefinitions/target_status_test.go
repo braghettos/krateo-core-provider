@@ -52,7 +52,7 @@ func TestSetTargetStatus_RemoteRecordsSecretVersion(t *testing.T) {
 	cr := &compositiondefinitionsv1alpha1.CompositionDefinition{
 		Spec: compositiondefinitionsv1alpha1.CompositionDefinitionSpec{
 			Deploy: &compositiondefinitionsv1alpha1.DeploymentTarget{
-				Mode: compositiondefinitionsv1alpha1.DeploymentModeRemote,
+				TargetRef: &compositiondefinitionsv1alpha1.TargetReference{Name: "prod-eu"},
 			},
 		},
 	}

@@ -77,35 +77,32 @@ type ChartInfoProps struct {
 	Credentials *Credentials `json:"credentials,omitempty"`
 }
 
-// DeploymentMode selects where the composition-dynamic-controller (and the
-// generated CRD and RBAC) are deployed.
-// +kubebuilder:validation:Enum=Local;Remote
+// DeploymentMode is the (status-only) classification of where the
+// composition-dynamic-controller is deployed.
 type DeploymentMode string
 
 const (
-	// DeploymentModeLocal deploys into the management cluster - the historical
-	// behaviour and the default when no deployment target is specified.
+	// DeploymentModeLocal: deployed into the management cluster (the default when no
+	// target is referenced).
 	DeploymentModeLocal DeploymentMode = "Local"
-	// DeploymentModeRemote deploys into a remote target cluster addressed by
-	// KubeconfigRef.
+	// DeploymentModeRemote: deployed into a remote target cluster.
 	DeploymentModeRemote DeploymentMode = "Remote"
 )
 
-// DeploymentTarget selects where the composition-dynamic-controller, the generated
-// CRD and its RBAC are deployed.
-// +kubebuilder:validation:XValidation:rule="self.mode != 'Remote' || has(self.kubeconfigRef)", message="kubeconfigRef is required when mode is Remote"
-type DeploymentTarget struct {
-	// Mode: Local (default) deploys into the management cluster; Remote deploys into
-	// the cluster addressed by KubeconfigRef.
-	// +kubebuilder:default=Local
-	// +optional
-	Mode DeploymentMode `json:"mode,omitempty"`
+// TargetReference references a cluster-scoped KubernetesTarget by name.
+type TargetReference struct {
+	// Name of the cluster-scoped KubernetesTarget.
+	Name string `json:"name"`
+}
 
-	// KubeconfigRef: reference to a Kubernetes Secret key holding the kubeconfig of the
-	// remote target cluster. Required when Mode is Remote. The Secret is the credential
-	// rotation seam - populate and rotate it via External Secrets Operator.
+// DeploymentTarget selects where the composition-dynamic-controller, the generated CRD
+// and its RBAC are deployed. With no targetRef, deployment is local (the management
+// cluster).
+type DeploymentTarget struct {
+	// TargetRef references a cluster-scoped KubernetesTarget describing the remote
+	// cluster to deploy to. When omitted, deployment is local.
 	// +optional
-	KubeconfigRef *rtv1.SecretKeySelector `json:"kubeconfigRef,omitempty"`
+	TargetRef *TargetReference `json:"targetRef,omitempty"`
 }
 
 type CompositionDefinitionSpec struct {
@@ -114,9 +111,40 @@ type CompositionDefinitionSpec struct {
 
 	// Deploy: selects whether the composition-dynamic-controller (and the generated
 	// CRD and RBAC) are deployed locally in the management cluster (the default) or to
-	// a remote target cluster. When omitted, deployment is local.
+	// a remote target cluster referenced by a KubernetesTarget. When omitted, deployment
+	// is local.
 	// +optional
 	Deploy *DeploymentTarget `json:"deploy,omitempty"`
+}
+
+// KubernetesTargetSpec describes how to reach a remote target cluster.
+type KubernetesTargetSpec struct {
+	// KubeconfigRef: reference to a Kubernetes Secret key holding the kubeconfig of the
+	// target cluster. The Secret is the credential rotation seam - populate and rotate
+	// it via External Secrets Operator.
+	KubeconfigRef rtv1.SecretKeySelector `json:"kubeconfigRef"`
+}
+
+//+kubebuilder:object:root=true
+//+kubebuilder:resource:scope=Cluster,categories={krateo,core}
+
+// KubernetesTarget is a cluster-scoped reference to a remote cluster, used by a
+// CompositionDefinition's spec.deploy.targetRef to deploy compositions remotely.
+type KubernetesTarget struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+
+	Spec KubernetesTargetSpec `json:"spec,omitempty"`
+}
+
+//+kubebuilder:object:root=true
+
+// KubernetesTargetList is a list of KubernetesTarget.
+type KubernetesTargetList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+
+	Items []KubernetesTarget `json:"items"`
 }
 
 type VersionDetail struct {

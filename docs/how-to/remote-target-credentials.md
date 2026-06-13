@@ -1,15 +1,27 @@
 # How-to: credentials for remote deployment targets (with External Secrets Operator)
 
-When a `CompositionDefinition` sets `spec.deploy.mode: Remote`, core-provider needs a
-kubeconfig for the target cluster. core-provider is a **pure consumer of a native
-Kubernetes Secret**: it reads the kubeconfig on every reconcile and re-reconciles
-promptly when the Secret changes (a Secret watch is wired in the controller). It does
-**not** mint or rotate credentials itself — that is delegated to your secret manager via
-**External Secrets Operator (ESO)**.
+When a `CompositionDefinition` references a remote cluster via
+`spec.deploy.targetRef`, core-provider resolves the named **cluster-scoped
+`KubernetesTarget`**, then the kubeconfig Secret it points at. core-provider is a **pure
+consumer of a native Kubernetes Secret**: it reads the kubeconfig on every reconcile and
+re-reconciles promptly when the Secret (or the KubernetesTarget) changes — watches are
+wired in the controller. It does **not** mint or rotate credentials itself — that is
+delegated to your secret manager via **External Secrets Operator (ESO)**.
 
 ## The contract
 
 ```yaml
+# Cluster-scoped: defines a remote cluster once; referenced by many CompositionDefinitions.
+apiVersion: core.krateo.io/v1alpha1
+kind: KubernetesTarget
+metadata:
+  name: prod-eu
+spec:
+  kubeconfigRef:
+    name: prod-eu-kubeconfig     # a native Secret in the management cluster
+    namespace: krateo-system
+    key: kubeconfig              # key holding a complete kubeconfig
+---
 apiVersion: core.krateo.io/v1alpha1
 kind: CompositionDefinition
 metadata:
@@ -19,11 +31,8 @@ spec:
   chart:
     url: https://example.com/fireworks-app-0.1.0.tgz
   deploy:
-    mode: Remote
-    kubeconfigRef:
-      name: prod-eu-kubeconfig   # a native Secret in the management cluster
-      namespace: demo-system
-      key: kubeconfig            # key holding a complete kubeconfig
+    targetRef:
+      name: prod-eu             # the KubernetesTarget above
 ```
 
 The Secret value under `key` must be a complete kubeconfig that authenticates to the

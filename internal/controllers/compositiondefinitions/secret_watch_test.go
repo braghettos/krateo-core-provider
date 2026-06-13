@@ -7,80 +7,56 @@ import (
 	rtv1 "github.com/krateoplatformops/provider-runtime/apis/common/v1"
 )
 
-func secretSelector(name, namespace string) rtv1.SecretKeySelector {
-	sel := rtv1.SecretKeySelector{Key: "kubeconfig"}
+func chartCredsSecret(name, namespace string) rtv1.SecretKeySelector {
+	sel := rtv1.SecretKeySelector{Key: "password"}
 	sel.Name = name
 	sel.Namespace = namespace
 	return sel
 }
 
-func TestCompositionReferencesSecret(t *testing.T) {
-	kubeconfigRef := secretSelector("prod-eu-kubeconfig", "demo-system")
-	credsRef := secretSelector("chart-creds", "demo-system")
-
-	cases := []struct {
-		name   string
-		cd     *compositiondefinitionsv1alpha1.CompositionDefinition
-		ns     string
-		secret string
-		want   bool
-	}{
-		{
-			name: "matches kubeconfig ref",
-			cd: &compositiondefinitionsv1alpha1.CompositionDefinition{
-				Spec: compositiondefinitionsv1alpha1.CompositionDefinitionSpec{
-					Deploy: &compositiondefinitionsv1alpha1.DeploymentTarget{
-						Mode:          compositiondefinitionsv1alpha1.DeploymentModeRemote,
-						KubeconfigRef: &kubeconfigRef,
-					},
-				},
+func TestCompositionReferencesChartSecret(t *testing.T) {
+	cd := &compositiondefinitionsv1alpha1.CompositionDefinition{
+		Spec: compositiondefinitionsv1alpha1.CompositionDefinitionSpec{
+			Chart: &compositiondefinitionsv1alpha1.ChartInfo{
+				Url:         "oci://example.com/chart",
+				Credentials: &compositiondefinitionsv1alpha1.Credentials{Username: "u", PasswordRef: chartCredsSecret("chart-creds", "demo-system")},
 			},
-			ns: "demo-system", secret: "prod-eu-kubeconfig", want: true,
-		},
-		{
-			name: "matches chart credential ref",
-			cd: &compositiondefinitionsv1alpha1.CompositionDefinition{
-				Spec: compositiondefinitionsv1alpha1.CompositionDefinitionSpec{
-					Chart: &compositiondefinitionsv1alpha1.ChartInfo{
-						Url:         "oci://example.com/chart",
-						Credentials: &compositiondefinitionsv1alpha1.Credentials{Username: "u", PasswordRef: credsRef},
-					},
-				},
-			},
-			ns: "demo-system", secret: "chart-creds", want: true,
-		},
-		{
-			name: "wrong namespace does not match",
-			cd: &compositiondefinitionsv1alpha1.CompositionDefinition{
-				Spec: compositiondefinitionsv1alpha1.CompositionDefinitionSpec{
-					Deploy: &compositiondefinitionsv1alpha1.DeploymentTarget{KubeconfigRef: &kubeconfigRef},
-				},
-			},
-			ns: "other", secret: "prod-eu-kubeconfig", want: false,
-		},
-		{
-			name:   "no refs does not match",
-			cd:     &compositiondefinitionsv1alpha1.CompositionDefinition{},
-			ns:     "demo-system",
-			secret: "prod-eu-kubeconfig",
-			want:   false,
-		},
-		{
-			name: "local deploy without kubeconfig ref does not match",
-			cd: &compositiondefinitionsv1alpha1.CompositionDefinition{
-				Spec: compositiondefinitionsv1alpha1.CompositionDefinitionSpec{
-					Deploy: &compositiondefinitionsv1alpha1.DeploymentTarget{Mode: compositiondefinitionsv1alpha1.DeploymentModeLocal},
-				},
-			},
-			ns: "demo-system", secret: "prod-eu-kubeconfig", want: false,
 		},
 	}
 
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := compositionReferencesSecret(tc.cd, tc.ns, tc.secret); got != tc.want {
-				t.Fatalf("compositionReferencesSecret() = %v, want %v", got, tc.want)
-			}
-		})
+	if !compositionReferencesChartSecret(cd, "demo-system", "chart-creds") {
+		t.Fatal("expected match on chart credential secret")
+	}
+	if compositionReferencesChartSecret(cd, "other", "chart-creds") {
+		t.Fatal("did not expect match on a different namespace")
+	}
+	if compositionReferencesChartSecret(&compositiondefinitionsv1alpha1.CompositionDefinition{}, "demo-system", "chart-creds") {
+		t.Fatal("did not expect match when there are no chart credentials")
+	}
+}
+
+func TestCompositionReferencesTargetIn(t *testing.T) {
+	cd := &compositiondefinitionsv1alpha1.CompositionDefinition{
+		Spec: compositiondefinitionsv1alpha1.CompositionDefinitionSpec{
+			Deploy: &compositiondefinitionsv1alpha1.DeploymentTarget{
+				TargetRef: &compositiondefinitionsv1alpha1.TargetReference{Name: "prod-eu"},
+			},
+		},
+	}
+
+	if !compositionReferencesTargetIn(cd, map[string]bool{"prod-eu": true}) {
+		t.Fatal("expected match when the referenced target is in the set")
+	}
+	if compositionReferencesTargetIn(cd, map[string]bool{"prod-us": true}) {
+		t.Fatal("did not expect match for an unrelated target")
+	}
+	if compositionReferencesTargetIn(&compositiondefinitionsv1alpha1.CompositionDefinition{}, map[string]bool{"prod-eu": true}) {
+		t.Fatal("did not expect match when there is no deploy.targetRef")
+	}
+	local := &compositiondefinitionsv1alpha1.CompositionDefinition{
+		Spec: compositiondefinitionsv1alpha1.CompositionDefinitionSpec{Deploy: &compositiondefinitionsv1alpha1.DeploymentTarget{}},
+	}
+	if compositionReferencesTargetIn(local, map[string]bool{"prod-eu": true}) {
+		t.Fatal("did not expect match for a local deploy (no targetRef)")
 	}
 }

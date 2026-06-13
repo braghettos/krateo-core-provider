@@ -36,41 +36,41 @@ type Clients struct {
 	SecretResourceVersion string
 }
 
-// IsRemote reports whether the deployment target selects a remote cluster.
+// IsRemote reports whether the deployment target references a remote cluster.
 func IsRemote(target *compositiondefinitionsv1alpha1.DeploymentTarget) bool {
-	return target != nil && target.Mode == compositiondefinitionsv1alpha1.DeploymentModeRemote
+	return target != nil && target.TargetRef != nil && target.TargetRef.Name != ""
 }
 
-// Remote builds the clients for a remote target cluster from the kubeconfig stored in
-// the Secret referenced by target.KubeconfigRef. The Secret is read from the management
-// cluster via mgmt.
+// Remote builds the clients for the remote cluster referenced by target.TargetRef. It
+// resolves the cluster-scoped KubernetesTarget, then the kubeconfig Secret it points at;
+// both are read from the management cluster via mgmt.
 func Remote(ctx context.Context, mgmt client.Client, target *compositiondefinitionsv1alpha1.DeploymentTarget) (*Clients, error) {
 	if !IsRemote(target) {
-		return nil, fmt.Errorf("deployment target is not remote")
+		return nil, fmt.Errorf("deployment target does not reference a KubernetesTarget")
 	}
-	if target.KubeconfigRef == nil {
-		return nil, fmt.Errorf("kubeconfigRef is required when deployment mode is Remote")
+
+	kt := &compositiondefinitionsv1alpha1.KubernetesTarget{}
+	if err := mgmt.Get(ctx, types.NamespacedName{Name: target.TargetRef.Name}, kt); err != nil {
+		return nil, fmt.Errorf("reading KubernetesTarget %q: %w", target.TargetRef.Name, err)
 	}
+	ref := kt.Spec.KubeconfigRef
 
 	secret := &corev1.Secret{}
 	if err := mgmt.Get(ctx, types.NamespacedName{
-		Namespace: target.KubeconfigRef.Namespace,
-		Name:      target.KubeconfigRef.Name,
+		Namespace: ref.Namespace,
+		Name:      ref.Name,
 	}, secret); err != nil {
-		return nil, fmt.Errorf("reading kubeconfig secret %s/%s: %w",
-			target.KubeconfigRef.Namespace, target.KubeconfigRef.Name, err)
+		return nil, fmt.Errorf("reading kubeconfig secret %s/%s: %w", ref.Namespace, ref.Name, err)
 	}
 
-	kubeconfig := secret.Data[target.KubeconfigRef.Key]
+	kubeconfig := secret.Data[ref.Key]
 	if len(kubeconfig) == 0 {
-		return nil, fmt.Errorf("kubeconfig secret %s/%s key %q is empty",
-			target.KubeconfigRef.Namespace, target.KubeconfigRef.Name, target.KubeconfigRef.Key)
+		return nil, fmt.Errorf("kubeconfig secret %s/%s key %q is empty", ref.Namespace, ref.Name, ref.Key)
 	}
 
 	rc, err := clientcmd.RESTConfigFromKubeConfig(kubeconfig)
 	if err != nil {
-		return nil, fmt.Errorf("parsing kubeconfig from secret %s/%s: %w",
-			target.KubeconfigRef.Namespace, target.KubeconfigRef.Name, err)
+		return nil, fmt.Errorf("parsing kubeconfig from secret %s/%s: %w", ref.Namespace, ref.Name, err)
 	}
 
 	clients, err := clientsFor(rc)

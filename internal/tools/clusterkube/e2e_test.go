@@ -43,6 +43,7 @@ func mgmtClient(t *testing.T) client.Client {
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)
 	_ = apiextensionsv1.AddToScheme(scheme)
+	_ = compositiondefinitionsv1alpha1.SchemeBuilder.AddToScheme(scheme)
 	cl, err := client.New(rc, client.Options{Scheme: scheme})
 	if err != nil {
 		t.Fatalf("building mgmt client: %v", err)
@@ -66,7 +67,8 @@ func TestE2E_RemoteTargeting(t *testing.T) {
 		t.Fatalf("reading target kubeconfig: %v", err)
 	}
 
-	// 1. Store the target kubeconfig as a native Secret in the management cluster.
+	// 1. Store the target kubeconfig as a native Secret in the management cluster, and a
+	//    cluster-scoped KubernetesTarget that references it.
 	secretName := "e2e-target-kubeconfig"
 	secret := corev1Secret(secretName, "default", targetKubeconfig)
 	if err := mgmt.Create(ctx, secret); err != nil && !apierrors.IsAlreadyExists(err) {
@@ -74,16 +76,24 @@ func TestE2E_RemoteTargeting(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = mgmt.Delete(ctx, secret) })
 
-	ref := &rtv1.SecretKeySelector{Key: "kubeconfig"}
+	ref := rtv1.SecretKeySelector{Key: "kubeconfig"}
 	ref.Name = secretName
 	ref.Namespace = "default"
-	target := &compositiondefinitionsv1alpha1.DeploymentTarget{
-		Mode:          compositiondefinitionsv1alpha1.DeploymentModeRemote,
-		KubeconfigRef: ref,
+	kt := &compositiondefinitionsv1alpha1.KubernetesTarget{
+		ObjectMeta: metav1.ObjectMeta{Name: "e2e-target"},
+		Spec:       compositiondefinitionsv1alpha1.KubernetesTargetSpec{KubeconfigRef: ref},
+	}
+	if err := mgmt.Create(ctx, kt); err != nil && !apierrors.IsAlreadyExists(err) {
+		t.Fatalf("creating KubernetesTarget: %v", err)
+	}
+	t.Cleanup(func() { _ = mgmt.Delete(ctx, kt) })
+
+	deploy := &compositiondefinitionsv1alpha1.DeploymentTarget{
+		TargetRef: &compositiondefinitionsv1alpha1.TargetReference{Name: "e2e-target"},
 	}
 
-	// 2. Build remote clients from the Secret (the real feature code path).
-	clients, err := Remote(ctx, mgmt, target)
+	// 2. Resolve targetRef -> KubernetesTarget -> Secret -> clients (the real path).
+	clients, err := Remote(ctx, mgmt, deploy)
 	if err != nil {
 		t.Fatalf("clusterkube.Remote: %v", err)
 	}

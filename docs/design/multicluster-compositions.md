@@ -8,15 +8,17 @@
 > + pull-drift, with an optional true-pull mode).
 
 > **Implementation status (2026-06-13):** Landed on `main` — a `CompositionDefinition`
-> chooses where the CDC (+ generated CRD + RBAC) is deployed via `spec.deploy.mode`
-> (`Local` default | `Remote`) with `spec.deploy.kubeconfigRef` pointing at a native
-> Secret (ESO-rotatable). Clients are resolved per-reconcile in `Connect()`
-> (`internal/tools/clusterkube`, returning kube/dynamic/clientset for the target): the
-> CompositionDefinition + secrets + status stay on the management client (`e.mgmt`);
-> CRD/RBAC/CDC install on the target clients (`e.kube`/`e.dynamic`/`e.client`).
-> Hand-rolled, kubeconfig-only; no SA-token renewal in-process (delegated to ESO).
-> `status.target` reports mode/connectionStatus/version/kubeconfigSecretResourceVersion.
-> A Secret watch re-reconciles on credential rotation.
+> chooses where the CDC (+ generated CRD + RBAC) is deployed via
+> `spec.deploy.targetRef.name`, which references a **cluster-scoped `KubernetesTarget`
+> CRD** (`spec.kubeconfigRef` → a native, ESO-rotatable Secret). No `targetRef` ⇒ local
+> (default, backward compatible). Clients are resolved per-reconcile in `Connect()`
+> (`internal/tools/clusterkube` resolves targetRef → KubernetesTarget → Secret →
+> kube/dynamic/clientset): the CompositionDefinition + secrets + status stay on the
+> management client (`e.mgmt`); CRD/RBAC/CDC install on the target clients
+> (`e.kube`/`e.dynamic`/`e.client`). Hand-rolled, kubeconfig-only; no SA-token renewal
+> in-process (delegated to ESO). `status.target` reports
+> mode/connectionStatus/version/kubeconfigSecretResourceVersion. Watches on Secret and
+> KubernetesTarget re-reconcile on credential rotation / target repoint.
 >
 > **Conversion webhook (resolved):** conversion config is target-aware in
 > `crd.ApplyOrUpdateCRD` via `ApplyOpts{Remote, WebhookURL}` (`injectConversionConfToCRD`).

@@ -13,11 +13,40 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
-func kubeconfigRef() *rtv1.SecretKeySelector {
-	ref := &rtv1.SecretKeySelector{Key: "kubeconfig"}
-	ref.Name = "prod-eu-kubeconfig"
-	ref.Namespace = "demo-system"
-	return ref
+const (
+	targetName = "prod-eu"
+	secretName = "prod-eu-kubeconfig"
+	secretNS   = "krateo-system"
+)
+
+func remoteDeploy() *compositiondefinitionsv1alpha1.DeploymentTarget {
+	return &compositiondefinitionsv1alpha1.DeploymentTarget{
+		TargetRef: &compositiondefinitionsv1alpha1.TargetReference{Name: targetName},
+	}
+}
+
+func kubernetesTarget() *compositiondefinitionsv1alpha1.KubernetesTarget {
+	ref := rtv1.SecretKeySelector{Key: "kubeconfig"}
+	ref.Name = secretName
+	ref.Namespace = secretNS
+	return &compositiondefinitionsv1alpha1.KubernetesTarget{
+		ObjectMeta: metav1.ObjectMeta{Name: targetName},
+		Spec:       compositiondefinitionsv1alpha1.KubernetesTargetSpec{KubeconfigRef: ref},
+	}
+}
+
+func kubeconfigSecret(data string) *corev1.Secret {
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: secretNS},
+		Data:       map[string][]byte{"kubeconfig": []byte(data)},
+	}
+}
+
+func newFakeClient(objs ...runtime.Object) *fake.ClientBuilder {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = compositiondefinitionsv1alpha1.SchemeBuilder.AddToScheme(scheme)
+	return fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...)
 }
 
 func TestIsRemote(t *testing.T) {
@@ -26,10 +55,11 @@ func TestIsRemote(t *testing.T) {
 		target *compositiondefinitionsv1alpha1.DeploymentTarget
 		want   bool
 	}{
-		{"nil target", nil, false},
-		{"empty mode", &compositiondefinitionsv1alpha1.DeploymentTarget{}, false},
-		{"local", &compositiondefinitionsv1alpha1.DeploymentTarget{Mode: compositiondefinitionsv1alpha1.DeploymentModeLocal}, false},
-		{"remote", &compositiondefinitionsv1alpha1.DeploymentTarget{Mode: compositiondefinitionsv1alpha1.DeploymentModeRemote}, true},
+		{"nil deploy", nil, false},
+		{"empty deploy", &compositiondefinitionsv1alpha1.DeploymentTarget{}, false},
+		{"nil targetRef", &compositiondefinitionsv1alpha1.DeploymentTarget{TargetRef: nil}, false},
+		{"empty target name", &compositiondefinitionsv1alpha1.DeploymentTarget{TargetRef: &compositiondefinitionsv1alpha1.TargetReference{}}, false},
+		{"named target", remoteDeploy(), true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -40,59 +70,37 @@ func TestIsRemote(t *testing.T) {
 	}
 }
 
-func newFakeClient(objs ...runtime.Object) *fake.ClientBuilder {
-	scheme := runtime.NewScheme()
-	_ = clientgoscheme.AddToScheme(scheme)
-	return fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...)
-}
-
-func remoteTarget() *compositiondefinitionsv1alpha1.DeploymentTarget {
-	return &compositiondefinitionsv1alpha1.DeploymentTarget{
-		Mode:          compositiondefinitionsv1alpha1.DeploymentModeRemote,
-		KubeconfigRef: kubeconfigRef(),
-	}
-}
-
 func TestRemote_NotRemote(t *testing.T) {
 	c := newFakeClient().Build()
-	if _, err := Remote(context.Background(), c, &compositiondefinitionsv1alpha1.DeploymentTarget{Mode: compositiondefinitionsv1alpha1.DeploymentModeLocal}); err == nil {
-		t.Fatal("expected error for non-remote target")
+	if _, err := Remote(context.Background(), c, &compositiondefinitionsv1alpha1.DeploymentTarget{}); err == nil {
+		t.Fatal("expected error for a deploy with no targetRef")
 	}
 }
 
-func TestRemote_MissingKubeconfigRef(t *testing.T) {
-	c := newFakeClient().Build()
-	target := &compositiondefinitionsv1alpha1.DeploymentTarget{Mode: compositiondefinitionsv1alpha1.DeploymentModeRemote}
-	if _, err := Remote(context.Background(), c, target); err == nil {
-		t.Fatal("expected error for missing kubeconfigRef")
+func TestRemote_TargetNotFound(t *testing.T) {
+	c := newFakeClient(kubeconfigSecret("x")).Build() // secret exists, target does not
+	if _, err := Remote(context.Background(), c, remoteDeploy()); err == nil {
+		t.Fatal("expected error when the KubernetesTarget is missing")
 	}
 }
 
 func TestRemote_SecretNotFound(t *testing.T) {
-	c := newFakeClient().Build()
-	if _, err := Remote(context.Background(), c, remoteTarget()); err == nil {
-		t.Fatal("expected error when kubeconfig secret is missing")
+	c := newFakeClient(kubernetesTarget()).Build() // target exists, secret does not
+	if _, err := Remote(context.Background(), c, remoteDeploy()); err == nil {
+		t.Fatal("expected error when the kubeconfig secret is missing")
 	}
 }
 
 func TestRemote_EmptyKubeconfig(t *testing.T) {
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "prod-eu-kubeconfig", Namespace: "demo-system"},
-		Data:       map[string][]byte{"kubeconfig": []byte("")},
-	}
-	c := newFakeClient(secret).Build()
-	if _, err := Remote(context.Background(), c, remoteTarget()); err == nil {
+	c := newFakeClient(kubernetesTarget(), kubeconfigSecret("")).Build()
+	if _, err := Remote(context.Background(), c, remoteDeploy()); err == nil {
 		t.Fatal("expected error for empty kubeconfig")
 	}
 }
 
 func TestRemote_InvalidKubeconfig(t *testing.T) {
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "prod-eu-kubeconfig", Namespace: "demo-system"},
-		Data:       map[string][]byte{"kubeconfig": []byte("not-a-valid-kubeconfig")},
-	}
-	c := newFakeClient(secret).Build()
-	if _, err := Remote(context.Background(), c, remoteTarget()); err == nil {
+	c := newFakeClient(kubernetesTarget(), kubeconfigSecret("not-a-valid-kubeconfig")).Build()
+	if _, err := Remote(context.Background(), c, remoteDeploy()); err == nil {
 		t.Fatal("expected error for invalid kubeconfig")
 	}
 }
@@ -116,12 +124,8 @@ users:
   user:
     token: abc123
 `
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "prod-eu-kubeconfig", Namespace: "demo-system"},
-		Data:       map[string][]byte{"kubeconfig": []byte(kubeconfig)},
-	}
-	c := newFakeClient(secret).Build()
-	got, err := Remote(context.Background(), c, remoteTarget())
+	c := newFakeClient(kubernetesTarget(), kubeconfigSecret(kubeconfig)).Build()
+	got, err := Remote(context.Background(), c, remoteDeploy())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

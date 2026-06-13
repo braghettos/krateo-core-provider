@@ -156,19 +156,61 @@ func Setup(mgr ctrl.Manager, o Options) error {
 		Named(name).
 		WithOptions(o.ControllerOptions.ForControllerRuntime()).
 		For(&compositiondefinitionsv1alpha1.CompositionDefinition{}).
-		// Re-reconcile a CompositionDefinition when a Secret it references changes, so
+		// Re-reconcile a CompositionDefinition when a Secret it references changes (its
+		// chart credentials, or a kubeconfig Secret behind its KubernetesTarget), so
 		// credentials rotated out-of-band (e.g. by External Secrets Operator) are picked
 		// up promptly instead of waiting for the next poll.
 		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(enqueueForReferencedSecret(cli))).
+		// Re-reconcile CompositionDefinitions when the KubernetesTarget they reference
+		// changes (e.g. its kubeconfigRef is repointed).
+		Watches(&compositiondefinitionsv1alpha1.KubernetesTarget{}, handler.EnqueueRequestsFromMapFunc(enqueueForKubernetesTarget(cli))).
 		Complete(ratelimiter.New(name, r, o.ControllerOptions.GlobalRateLimiter))
 }
 
 // enqueueForReferencedSecret maps a Secret event to reconcile requests for every
-// CompositionDefinition that references it (kubeconfig for a remote target, or chart
-// repository credentials).
+// CompositionDefinition that references it - directly as chart credentials, or
+// transitively via a KubernetesTarget whose kubeconfigRef points at the Secret.
 func enqueueForReferencedSecret(cli client.Client) handler.MapFunc {
 	return func(ctx context.Context, obj client.Object) []reconcile.Request {
 		secret, ok := obj.(*corev1.Secret)
+		if !ok {
+			return nil
+		}
+
+		// Names of KubernetesTargets whose kubeconfig lives in this Secret.
+		targetNames := map[string]bool{}
+		var targets compositiondefinitionsv1alpha1.KubernetesTargetList
+		if err := cli.List(ctx, &targets); err == nil {
+			for i := range targets.Items {
+				ref := targets.Items[i].Spec.KubeconfigRef
+				if ref.Namespace == secret.Namespace && ref.Name == secret.Name {
+					targetNames[targets.Items[i].Name] = true
+				}
+			}
+		}
+
+		var list compositiondefinitionsv1alpha1.CompositionDefinitionList
+		if err := cli.List(ctx, &list); err != nil {
+			return nil
+		}
+
+		var reqs []reconcile.Request
+		for i := range list.Items {
+			cd := &list.Items[i]
+			if compositionReferencesChartSecret(cd, secret.Namespace, secret.Name) ||
+				compositionReferencesTargetIn(cd, targetNames) {
+				reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(cd)})
+			}
+		}
+		return reqs
+	}
+}
+
+// enqueueForKubernetesTarget maps a KubernetesTarget event to reconcile requests for
+// every CompositionDefinition referencing it.
+func enqueueForKubernetesTarget(cli client.Client) handler.MapFunc {
+	return func(ctx context.Context, obj client.Object) []reconcile.Request {
+		kt, ok := obj.(*compositiondefinitionsv1alpha1.KubernetesTarget)
 		if !ok {
 			return nil
 		}
@@ -181,7 +223,7 @@ func enqueueForReferencedSecret(cli client.Client) handler.MapFunc {
 		var reqs []reconcile.Request
 		for i := range list.Items {
 			cd := &list.Items[i]
-			if compositionReferencesSecret(cd, secret.Namespace, secret.Name) {
+			if compositionReferencesTargetIn(cd, map[string]bool{kt.Name: true}) {
 				reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(cd)})
 			}
 		}
@@ -189,20 +231,24 @@ func enqueueForReferencedSecret(cli client.Client) handler.MapFunc {
 	}
 }
 
-// compositionReferencesSecret reports whether cd references the Secret ns/name, either
-// as its remote-target kubeconfig or as its chart repository credentials.
-func compositionReferencesSecret(cd *compositiondefinitionsv1alpha1.CompositionDefinition, ns, name string) bool {
-	if d := cd.Spec.Deploy; d != nil && d.KubeconfigRef != nil {
-		if d.KubeconfigRef.Namespace == ns && d.KubeconfigRef.Name == name {
-			return true
-		}
+// compositionReferencesChartSecret reports whether cd uses the Secret ns/name as its
+// chart repository credentials.
+func compositionReferencesChartSecret(cd *compositiondefinitionsv1alpha1.CompositionDefinition, ns, name string) bool {
+	c := cd.Spec.Chart
+	if c == nil || c.Credentials == nil {
+		return false
 	}
-	if c := cd.Spec.Chart; c != nil && c.Credentials != nil {
-		if c.Credentials.PasswordRef.Namespace == ns && c.Credentials.PasswordRef.Name == name {
-			return true
-		}
+	return c.Credentials.PasswordRef.Namespace == ns && c.Credentials.PasswordRef.Name == name
+}
+
+// compositionReferencesTargetIn reports whether cd's deploy.targetRef names one of the
+// given KubernetesTargets.
+func compositionReferencesTargetIn(cd *compositiondefinitionsv1alpha1.CompositionDefinition, targetNames map[string]bool) bool {
+	d := cd.Spec.Deploy
+	if d == nil || d.TargetRef == nil {
+		return false
 	}
-	return false
+	return targetNames[d.TargetRef.Name]
 }
 
 // cleanupObsoleteFinalizerLabels removes the obsolete "composition.krateo.io/still-exist-compositions-finalizer" label
@@ -315,8 +361,8 @@ type external struct {
 // reachable, by probing the target cluster's discovery endpoint.
 func (e *external) setTargetStatus(cr *compositiondefinitionsv1alpha1.CompositionDefinition) {
 	mode := compositiondefinitionsv1alpha1.DeploymentModeLocal
-	if cr.Spec.Deploy != nil && cr.Spec.Deploy.Mode != "" {
-		mode = cr.Spec.Deploy.Mode
+	if clusterkube.IsRemote(cr.Spec.Deploy) {
+		mode = compositiondefinitionsv1alpha1.DeploymentModeRemote
 	}
 
 	ts := &compositiondefinitionsv1alpha1.TargetStatus{Mode: string(mode)}
