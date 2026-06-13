@@ -31,13 +31,17 @@
 >
 > **e2e-validated (2026-06-13):** the remote-targeting path was exercised against real
 > clusters — a kind management cluster + a disposable single-node GKE target, with a
-> self-contained ServiceAccount-token kubeconfig (the how-to recipe). Confirmed:
-> `clusterkube.Remote` builds working clients from the kubeconfig Secret and reaches the
-> GKE target; a `NoneConverter` multi-version CRD is accepted and established by the real
-> apiserver; resources land in the target and are absent in the management cluster
-> (isolation). Reproduce with `scripts/e2e-remote-targeting.sh` (build-tagged e2e test in
-> `internal/tools/clusterkube`). Not yet exercised: the full controller reconcile with
-> the CDC image + certManager against two clusters.
+> self-contained ServiceAccount-token kubeconfig (the how-to recipe). The e2e drives the
+> **real `crd.ApplyOrUpdateCRD` remote path** (v1alpha1 create + v1alpha2 AppendVersion →
+> `NoneConverter`) against the GKE apiserver, plus `clusterkube.Remote` connectivity and
+> target/management isolation. Reproduce with `scripts/e2e-remote-targeting.sh`
+> (build-tagged e2e in `internal/tools/clusterkube`).
+>
+> This e2e **caught a real remote bug**: `crd.Get` returned a CRD without `TypeMeta`
+> (typed reads via the direct remote client don't populate it), so `kube.Apply` failed
+> with "unstructured object has no kind" on remote multi-version updates. Fixed by
+> setting the GVK in `crd.Get`. Still not exercised: the full controller reconcile with
+> the CDC image + certManager across two clusters.
 
 ---
 
