@@ -28,6 +28,16 @@
 > targets**. To enable full multi-version conversion remotely, expose core-provider's
 > conversion endpoint and set `CORE_PROVIDER_WEBHOOK_URL` (its TLS cert must match the
 > served CA bundle). Projecting a conversion endpoint into the target is a follow-up.
+>
+> **e2e-validated (2026-06-13):** the remote-targeting path was exercised against real
+> clusters — a kind management cluster + a disposable single-node GKE target, with a
+> self-contained ServiceAccount-token kubeconfig (the how-to recipe). Confirmed:
+> `clusterkube.Remote` builds working clients from the kubeconfig Secret and reaches the
+> GKE target; a `NoneConverter` multi-version CRD is accepted and established by the real
+> apiserver; resources land in the target and are absent in the management cluster
+> (isolation). Reproduce with `scripts/e2e-remote-targeting.sh` (build-tagged e2e test in
+> `internal/tools/clusterkube`). Not yet exercised: the full controller reconcile with
+> the CDC image + certManager against two clusters.
 
 ---
 
