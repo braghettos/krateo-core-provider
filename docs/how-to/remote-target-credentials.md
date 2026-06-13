@@ -27,10 +27,34 @@ spec:
 ```
 
 The Secret value under `key` must be a complete kubeconfig that authenticates to the
-target cluster. The bound identity needs permission in the target to create/update/delete
-**CustomResourceDefinitions**, **RBAC** (ServiceAccounts/Roles/ClusterRoles + bindings),
-and **Deployments** (the composition-dynamic-controller) — plus whatever the chart's
-resources require.
+target cluster. See **RBAC for the target identity** below for what it needs to be able
+to do.
+
+## RBAC for the target identity
+
+In the target, the bound identity installs the generated **CustomResourceDefinition**,
+the **composition-dynamic-controller** (`Deployment` + `Service` + `ConfigMap` +
+`ServiceAccount`), the **RBAC** that controller runs as (`Role`/`ClusterRole` +
+bindings), and cleans up the composition instances on delete.
+
+A `ClusterRole` covering this is in
+[`remote-target-rbac.yaml`](remote-target-rbac.yaml). **Important caveat:** because the
+RBAC it creates for the controller carries permissions *derived from each chart*, the
+target identity must be allowed to grant them. Kubernetes privilege-escalation
+prevention therefore requires `bind` **and** `escalate` on `rbac.authorization.k8s.io`
+(already in the manifest) — without them, creating a Role/ClusterRole whose permissions
+exceed the identity's own is rejected. For this reason a fully-static least-privilege
+role is not achievable in the general case; `cluster-admin` is the simplest equivalent,
+and the provided `ClusterRole` is the tightest practical alternative.
+
+Bind it to the target ServiceAccount referenced by your kubeconfig:
+
+```bash
+kubectl apply -f remote-target-rbac.yaml
+kubectl create clusterrolebinding core-provider-remote \
+  --clusterrole=core-provider-remote-target \
+  --serviceaccount=kube-system:core-provider-remote
+```
 
 ## Rotation model
 
