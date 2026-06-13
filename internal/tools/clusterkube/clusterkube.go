@@ -13,9 +13,10 @@ import (
 	"fmt"
 
 	compositiondefinitionsv1alpha1 "github.com/krateoplatformops/core-provider/apis/compositiondefinitions/v1alpha1"
-	"github.com/krateoplatformops/core-provider/internal/tools/resolvers"
+	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -30,6 +31,9 @@ type Clients struct {
 	Dynamic   dynamic.Interface
 	Discovery discovery.DiscoveryInterface
 	Config    *rest.Config
+	// SecretResourceVersion is the resourceVersion of the kubeconfig Secret these
+	// clients were built from, for rotation traceability (empty for local targets).
+	SecretResourceVersion string
 }
 
 // IsRemote reports whether the deployment target selects a remote cluster.
@@ -48,23 +52,33 @@ func Remote(ctx context.Context, mgmt client.Client, target *compositiondefiniti
 		return nil, fmt.Errorf("kubeconfigRef is required when deployment mode is Remote")
 	}
 
-	kubeconfig, err := resolvers.GetSecret(ctx, mgmt, *target.KubeconfigRef)
-	if err != nil {
+	secret := &corev1.Secret{}
+	if err := mgmt.Get(ctx, types.NamespacedName{
+		Namespace: target.KubeconfigRef.Namespace,
+		Name:      target.KubeconfigRef.Name,
+	}, secret); err != nil {
 		return nil, fmt.Errorf("reading kubeconfig secret %s/%s: %w",
 			target.KubeconfigRef.Namespace, target.KubeconfigRef.Name, err)
 	}
+
+	kubeconfig := secret.Data[target.KubeconfigRef.Key]
 	if len(kubeconfig) == 0 {
 		return nil, fmt.Errorf("kubeconfig secret %s/%s key %q is empty",
 			target.KubeconfigRef.Namespace, target.KubeconfigRef.Name, target.KubeconfigRef.Key)
 	}
 
-	rc, err := clientcmd.RESTConfigFromKubeConfig([]byte(kubeconfig))
+	rc, err := clientcmd.RESTConfigFromKubeConfig(kubeconfig)
 	if err != nil {
 		return nil, fmt.Errorf("parsing kubeconfig from secret %s/%s: %w",
 			target.KubeconfigRef.Namespace, target.KubeconfigRef.Name, err)
 	}
 
-	return clientsFor(rc)
+	clients, err := clientsFor(rc)
+	if err != nil {
+		return nil, err
+	}
+	clients.SecretResourceVersion = secret.ResourceVersion
+	return clients, nil
 }
 
 func clientsFor(rc *rest.Config) (*Clients, error) {

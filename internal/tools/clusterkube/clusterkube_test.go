@@ -140,4 +140,7 @@ users:
 	if got.Kube == nil || got.Dynamic == nil || got.Discovery == nil {
 		t.Fatal("expected non-nil clients")
 	}
+	if got.SecretResourceVersion == "" {
+		t.Fatal("expected SecretResourceVersion to be captured from the kubeconfig Secret")
+	}
 }

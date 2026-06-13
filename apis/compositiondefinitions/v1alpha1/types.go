@@ -148,9 +148,34 @@ type Managed struct {
 	Kind string `json:"kind,omitempty"`
 }
 
+// TargetStatus reports the cluster the composition-dynamic-controller (and the
+// generated CRD and RBAC) are deployed to.
+type TargetStatus struct {
+	// Mode: where the controller is deployed (Local or Remote).
+	// +optional
+	Mode string `json:"mode,omitempty"`
+
+	// ConnectionStatus: Healthy when the target cluster is reachable, Down otherwise.
+	// +optional
+	ConnectionStatus string `json:"connectionStatus,omitempty"`
+
+	// Version: the Kubernetes version reported by the target cluster.
+	// +optional
+	Version string `json:"version,omitempty"`
+
+	// KubeconfigSecretResourceVersion: the resourceVersion of the kubeconfig Secret last
+	// used to reach a remote target, for credential-rotation traceability.
+	// +optional
+	KubeconfigSecretResourceVersion string `json:"kubeconfigSecretResourceVersion,omitempty"`
+}
+
 // CompositionDefinitionStatus is the status of a CompositionDefinition.
 type CompositionDefinitionStatus struct {
 	rtv1.ConditionedStatus `json:",inline"`
+
+	// Target: information about the cluster the controller is deployed to.
+	// +optional
+	Target *TargetStatus `json:"target,omitempty"`
 
 	// Kind: the kind of the custom resource - Last applied kind
 	Kind string `json:"kind,omitempty"`
@@ -178,6 +203,8 @@ type CompositionDefinitionStatus struct {
 //+kubebuilder:printcolumn:name="API VERSION",type="string",JSONPath=".status.apiVersion",priority=10
 //+kubebuilder:printcolumn:name="KIND",type="string",JSONPath=".status.kind",priority=10
 //+kubebuilder:printcolumn:name="PACKAGE URL",type="string",JSONPath=".status.packageUrl",priority=10
+//+kubebuilder:printcolumn:name="TARGET",type="string",JSONPath=".status.target.mode",priority=10
+//+kubebuilder:printcolumn:name="CONNECTION",type="string",JSONPath=".status.target.connectionStatus",priority=10
 
 // CompositionDefinition is a definition type with a spec and a status.
 type CompositionDefinition struct {

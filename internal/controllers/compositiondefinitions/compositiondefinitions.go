@@ -302,6 +302,8 @@ func (c *connector) Connect(ctx context.Context, mg resource.Managed) (reconcile
 		ext.kube = tc.Kube
 		ext.dynamic = tc.Dynamic
 		ext.discovery = tc.Discovery
+		ext.remote = true
+		ext.secretResourceVersion = tc.SecretResourceVersion
 		if meta.IsVerbose(cr) {
 			c.log.Debug("Deploying to remote target cluster",
 				"host", tc.Config.Host, "name", cr.Name)
@@ -323,6 +325,33 @@ type external struct {
 	kube      client.Client
 	log       logging.Logger
 	rec       record.EventRecorder
+
+	// remote is true when the target is a remote cluster; secretResourceVersion is the
+	// resourceVersion of the kubeconfig Secret used to reach it.
+	remote                bool
+	secretResourceVersion string
+}
+
+// setTargetStatus records where the controller is deployed and whether that cluster is
+// reachable, by probing the target cluster's discovery endpoint.
+func (e *external) setTargetStatus(cr *compositiondefinitionsv1alpha1.CompositionDefinition) {
+	mode := compositiondefinitionsv1alpha1.DeploymentModeLocal
+	if cr.Spec.Deploy != nil && cr.Spec.Deploy.Mode != "" {
+		mode = cr.Spec.Deploy.Mode
+	}
+
+	ts := &compositiondefinitionsv1alpha1.TargetStatus{Mode: string(mode)}
+	if v, err := e.discovery.ServerVersion(); err == nil {
+		ts.ConnectionStatus = "Healthy"
+		ts.Version = v.GitVersion
+	} else {
+		ts.ConnectionStatus = "Down"
+	}
+	if e.remote {
+		ts.KubeconfigSecretResourceVersion = e.secretResourceVersion
+	}
+
+	cr.Status.Target = ts
 }
 
 func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler.ExternalObservation, error) {
@@ -349,6 +378,9 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 	}
 	gvr := tools.ToGroupVersionResource(gvk)
 	log.Printf("[DBG] Observing (gvk: %s, gvr: %s)\n", gvk.String(), gvr.String())
+
+	// Record where the controller is deployed and whether that cluster is reachable.
+	e.setTargetStatus(cr)
 
 	crdOk, err := crdtools.Lookup(ctx, e.kube, gvr)
 	if err != nil {

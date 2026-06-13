@@ -249,7 +249,10 @@ Requirements this imposes on our code:
   poll). ✅ *Implemented* — the controller `.Watches(&corev1.Secret{}, …)` mapping a
   Secret event to every CompositionDefinition referencing it (kubeconfig or chart creds).
   See the ESO recipes in [`../how-to/remote-target-credentials.md`](../how-to/remote-target-credentials.md).
-  (`status.lastObservedSecretVersion` still TODO.)
+- **Target status** ✅ *Implemented* — `status.target` reports `mode`,
+  `connectionStatus` (Healthy/Down, probed via the target's discovery endpoint),
+  `version` (target k8s version) and `kubeconfigSecretResourceVersion` (rotation
+  traceability). Surfaced as `TARGET`/`CONNECTION` printer columns (`-o wide`).
 - **Tolerate brief auth failures** around a rotation boundary (retry/backoff, surface
   `connectionStatus: Down` only after a threshold) — ESO updates are eventually
   consistent.
