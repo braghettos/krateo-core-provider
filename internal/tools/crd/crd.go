@@ -134,6 +134,15 @@ type ApplyOpts struct {
 	CABundle                []byte
 	WebhookServiceNamespace string
 	WebhookServiceName      string
+
+	// Remote indicates the CRD is being applied to a remote target cluster, whose API
+	// server cannot reach the management cluster's in-cluster webhook Service.
+	Remote bool
+	// WebhookURL is the externally reachable conversion endpoint used for remote targets
+	// instead of the in-cluster Service. When Remote is true and WebhookURL is empty,
+	// conversion is disabled (NoneConverter) rather than registering an unreachable
+	// Service webhook.
+	WebhookURL string
 }
 
 // UpdateVersion updates the given CRD to set the given version spec. If the version
@@ -221,14 +230,19 @@ func ApplyOrUpdateCRD(ctx context.Context,
 		return gvr, fmt.Errorf("error appending version to CRD: %w", err)
 	}
 
-	if opts.CABundle == nil {
-		return gvr, fmt.Errorf("CA bundle is nil")
-	}
-	if opts.WebhookServiceName == "" {
-		return gvr, fmt.Errorf("webhook service name is empty")
-	}
-	if opts.WebhookServiceNamespace == "" {
-		return gvr, fmt.Errorf("webhook service namespace is empty")
+	// Service-based conversion (local targets) requires the in-cluster webhook Service
+	// coordinates and CA bundle. Remote targets use a URL-based webhook or no conversion,
+	// so those guards do not apply.
+	if !opts.Remote {
+		if opts.CABundle == nil {
+			return gvr, fmt.Errorf("CA bundle is nil")
+		}
+		if opts.WebhookServiceName == "" {
+			return gvr, fmt.Errorf("webhook service name is empty")
+		}
+		if opts.WebhookServiceNamespace == "" {
+			return gvr, fmt.Errorf("webhook service namespace is empty")
+		}
 	}
 	injectConversionConfToCRD(crd, opts)
 
@@ -253,10 +267,40 @@ func ApplyOrUpdateCRD(ctx context.Context,
 func injectConversionConfToCRD(crd *apiextensionsv1.CustomResourceDefinition, opts ApplyOpts) {
 	whport := int32(9443)
 	whpath := "/convert"
+	reviewVersions := []string{"v1", "v1alpha1", "v1alpha2"}
+
+	if opts.Remote {
+		// The remote API server cannot resolve the management cluster's in-cluster
+		// webhook Service. Use a URL-based webhook when an externally reachable endpoint
+		// is configured; otherwise disable conversion (a Service-based webhook would be
+		// unreachable and break every request that needs conversion).
+		if opts.WebhookURL == "" {
+			crd.Spec.Conversion = &apiextensionsv1.CustomResourceConversion{
+				Strategy: apiextensionsv1.NoneConverter,
+			}
+			return
+		}
+		url := strings.TrimRight(opts.WebhookURL, "/")
+		if !strings.HasSuffix(url, whpath) {
+			url += whpath
+		}
+		crd.Spec.Conversion = &apiextensionsv1.CustomResourceConversion{
+			Strategy: apiextensionsv1.WebhookConverter,
+			Webhook: &apiextensionsv1.WebhookConversion{
+				ConversionReviewVersions: reviewVersions,
+				ClientConfig: &apiextensionsv1.WebhookClientConfig{
+					URL:      &url,
+					CABundle: opts.CABundle,
+				},
+			},
+		}
+		return
+	}
+
 	conf := &apiextensionsv1.CustomResourceConversion{
 		Strategy: apiextensionsv1.WebhookConverter,
 		Webhook: &apiextensionsv1.WebhookConversion{
-			ConversionReviewVersions: []string{"v1", "v1alpha1", "v1alpha2"},
+			ConversionReviewVersions: reviewVersions,
 			ClientConfig: &apiextensionsv1.WebhookClientConfig{
 				Service: &apiextensionsv1.ServiceReference{
 					Namespace: opts.WebhookServiceNamespace,

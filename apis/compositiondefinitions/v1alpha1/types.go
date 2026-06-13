@@ -76,9 +76,47 @@ type ChartInfoProps struct {
 	// +optional
 	Credentials *Credentials `json:"credentials,omitempty"`
 }
+
+// DeploymentMode selects where the composition-dynamic-controller (and the
+// generated CRD and RBAC) are deployed.
+// +kubebuilder:validation:Enum=Local;Remote
+type DeploymentMode string
+
+const (
+	// DeploymentModeLocal deploys into the management cluster - the historical
+	// behaviour and the default when no deployment target is specified.
+	DeploymentModeLocal DeploymentMode = "Local"
+	// DeploymentModeRemote deploys into a remote target cluster addressed by
+	// KubeconfigRef.
+	DeploymentModeRemote DeploymentMode = "Remote"
+)
+
+// DeploymentTarget selects where the composition-dynamic-controller, the generated
+// CRD and its RBAC are deployed.
+// +kubebuilder:validation:XValidation:rule="self.mode != 'Remote' || has(self.kubeconfigRef)", message="kubeconfigRef is required when mode is Remote"
+type DeploymentTarget struct {
+	// Mode: Local (default) deploys into the management cluster; Remote deploys into
+	// the cluster addressed by KubeconfigRef.
+	// +kubebuilder:default=Local
+	// +optional
+	Mode DeploymentMode `json:"mode,omitempty"`
+
+	// KubeconfigRef: reference to a Kubernetes Secret key holding the kubeconfig of the
+	// remote target cluster. Required when Mode is Remote. The Secret is the credential
+	// rotation seam - populate and rotate it via External Secrets Operator.
+	// +optional
+	KubeconfigRef *rtv1.SecretKeySelector `json:"kubeconfigRef,omitempty"`
+}
+
 type CompositionDefinitionSpec struct {
 	// rtv1.ManagedSpec `json:",inline"`
 	Chart *ChartInfo `json:"chart,omitempty"`
+
+	// Deploy: selects whether the composition-dynamic-controller (and the generated
+	// CRD and RBAC) are deployed locally in the management cluster (the default) or to
+	// a remote target cluster. When omitted, deployment is local.
+	// +optional
+	Deploy *DeploymentTarget `json:"deploy,omitempty"`
 }
 
 type VersionDetail struct {
@@ -113,9 +151,34 @@ type Managed struct {
 	Kind string `json:"kind,omitempty"`
 }
 
+// TargetStatus reports the cluster the composition-dynamic-controller (and the
+// generated CRD and RBAC) are deployed to.
+type TargetStatus struct {
+	// Mode: where the controller is deployed (Local or Remote).
+	// +optional
+	Mode string `json:"mode,omitempty"`
+
+	// ConnectionStatus: Healthy when the target cluster is reachable, Down otherwise.
+	// +optional
+	ConnectionStatus string `json:"connectionStatus,omitempty"`
+
+	// Version: the Kubernetes version reported by the target cluster.
+	// +optional
+	Version string `json:"version,omitempty"`
+
+	// KubeconfigSecretResourceVersion: the resourceVersion of the kubeconfig Secret last
+	// used to reach a remote target, for credential-rotation traceability.
+	// +optional
+	KubeconfigSecretResourceVersion string `json:"kubeconfigSecretResourceVersion,omitempty"`
+}
+
 // CompositionDefinitionStatus is the status of a CompositionDefinition.
 type CompositionDefinitionStatus struct {
 	rtv1.ConditionedStatus `json:",inline"`
+
+	// Target: information about the cluster the controller is deployed to.
+	// +optional
+	Target *TargetStatus `json:"target,omitempty"`
 
 	// Kind: the kind of the custom resource - Last applied kind
 	Kind string `json:"kind,omitempty"`
@@ -147,6 +210,8 @@ type CompositionDefinitionStatus struct {
 //+kubebuilder:printcolumn:name="API VERSION",type="string",JSONPath=".status.apiVersion",priority=10
 //+kubebuilder:printcolumn:name="KIND",type="string",JSONPath=".status.kind",priority=10
 //+kubebuilder:printcolumn:name="PACKAGE URL",type="string",JSONPath=".status.packageUrl",priority=10
+//+kubebuilder:printcolumn:name="TARGET",type="string",JSONPath=".status.target.mode",priority=10
+//+kubebuilder:printcolumn:name="CONNECTION",type="string",JSONPath=".status.target.connectionStatus",priority=10
 
 // CompositionDefinition is a definition type with a spec and a status.
 type CompositionDefinition struct {
