@@ -91,6 +91,11 @@ func Get(ctx context.Context, kube client.Reader, gr schema.GroupResource) (*api
 		}
 	}
 
+	// Typed reads do not always populate TypeMeta (notably with the direct, non-cached
+	// client used for remote targets). Downstream apply derives the GVK from the object,
+	// so set it explicitly to keep CRD updates working regardless of the client.
+	res.SetGroupVersionKind(apiextensionsv1.SchemeGroupVersion.WithKind("CustomResourceDefinition"))
+
 	return &res, nil
 }
 

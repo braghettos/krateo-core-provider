@@ -21,6 +21,7 @@ import (
 	"time"
 
 	compositiondefinitionsv1alpha1 "github.com/krateoplatformops/core-provider/apis/compositiondefinitions/v1alpha1"
+	crdclient "github.com/krateoplatformops/core-provider/internal/tools/crd"
 	rtv1 "github.com/krateoplatformops/provider-runtime/apis/common/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -97,43 +98,60 @@ func TestE2E_RemoteTargeting(t *testing.T) {
 	}
 	t.Logf("target cluster reachable, version=%s, secretRV=%s", ver.GitVersion, clients.SecretResourceVersion)
 
-	// 4. Apply a NoneConverter multi-version CRD (the exact shape the feature emits for a
-	//    remote target with no webhook URL) to the TARGET and require the real apiserver
-	//    to accept and establish it.
+	// 4. Drive the REAL feature helper crd.ApplyOrUpdateCRD against the remote target,
+	//    exactly as Create()/Update() do. First a single version creates the CRD; a second
+	//    version exercises the AppendVersion + injectConversionConfToCRD remote path, which
+	//    must produce a NoneConverter (no CORE_PROVIDER_WEBHOOK_URL) the real apiserver
+	//    accepts and establishes.
 	group := fmt.Sprintf("e2e%s.krateo.io", uniqueSuffix())
-	crd := noneConverterCRD(group)
-	if err := clients.Kube.Create(ctx, crd); err != nil {
-		t.Fatalf("creating CRD on target: %v", err)
-	}
-	t.Cleanup(func() { _ = clients.Kube.Delete(ctx, crd) })
+	crdName := "widgets." + group
+	t.Cleanup(func() {
+		c := &apiextensionsv1.CustomResourceDefinition{}
+		c.Name = crdName
+		_ = clients.Kube.Delete(ctx, c)
+	})
 
-	if err := waitEstablished(ctx, clients.Kube, crd.Name, 90*time.Second); err != nil {
+	opts := crdclient.ApplyOpts{Remote: true} // remote, no webhook URL -> NoneConverter
+	if _, err := crdclient.ApplyOrUpdateCRD(ctx, clients.Kube, clients.Dynamic, widgetCRD(group, "v1alpha1"), opts); err != nil {
+		t.Fatalf("ApplyOrUpdateCRD (v1alpha1) on target: %v", err)
+	}
+	if _, err := crdclient.ApplyOrUpdateCRD(ctx, clients.Kube, clients.Dynamic, widgetCRD(group, "v1alpha2"), opts); err != nil {
+		t.Fatalf("ApplyOrUpdateCRD (v1alpha2) on target: %v", err)
+	}
+
+	if err := waitEstablished(ctx, clients.Kube, crdName, 90*time.Second); err != nil {
 		t.Fatalf("CRD not established on target: %v", err)
 	}
 
-	// 5a. The CRD exists in the TARGET with the NoneConverter strategy intact.
+	// 5a. The CRD exists in the TARGET, multi-version, with NoneConverter strategy.
 	gotTarget := &apiextensionsv1.CustomResourceDefinition{}
-	if err := clients.Kube.Get(ctx, types.NamespacedName{Name: crd.Name}, gotTarget); err != nil {
+	if err := clients.Kube.Get(ctx, types.NamespacedName{Name: crdName}, gotTarget); err != nil {
 		t.Fatalf("getting CRD from target: %v", err)
 	}
 	if gotTarget.Spec.Conversion == nil || gotTarget.Spec.Conversion.Strategy != apiextensionsv1.NoneConverter {
 		t.Fatalf("expected NoneConverter on target CRD, got %+v", gotTarget.Spec.Conversion)
 	}
-	if len(gotTarget.Spec.Versions) < 2 {
-		t.Fatalf("expected a multi-version CRD, got %d versions", len(gotTarget.Spec.Versions))
+	served := 0
+	for _, v := range gotTarget.Spec.Versions {
+		if v.Name == "v1alpha1" || v.Name == "v1alpha2" {
+			served++
+		}
+	}
+	if served != 2 {
+		t.Fatalf("expected both v1alpha1 and v1alpha2 on the target CRD, versions=%+v", gotTarget.Spec.Versions)
 	}
 
 	// 5b. Isolation: the CRD must NOT exist in the management cluster.
 	gotMgmt := &apiextensionsv1.CustomResourceDefinition{}
-	err = mgmt.Get(ctx, types.NamespacedName{Name: crd.Name}, gotMgmt)
+	err = mgmt.Get(ctx, types.NamespacedName{Name: crdName}, gotMgmt)
 	if err == nil {
-		t.Fatalf("CRD leaked into the management cluster: %s", crd.Name)
+		t.Fatalf("CRD leaked into the management cluster: %s", crdName)
 	}
 	if !apierrors.IsNotFound(err) {
 		t.Fatalf("unexpected error checking management cluster: %v", err)
 	}
 
-	t.Logf("OK: CRD %s established on target, absent in management (isolation verified)", crd.Name)
+	t.Logf("OK: CRD %s applied via crd.ApplyOrUpdateCRD (remote, NoneConverter), established on target, absent in management", crdName)
 }
 
 func corev1Secret(name, namespace string, kubeconfig []byte) *corev1.Secret {
@@ -143,19 +161,25 @@ func corev1Secret(name, namespace string, kubeconfig []byte) *corev1.Secret {
 	}
 }
 
-// noneConverterCRD builds a minimal two-version CRD whose conversion strategy is None -
-// the exact shape injectConversionConfToCRD emits for a remote target without a webhook
-// URL. The point of the e2e is to confirm a real apiserver accepts and establishes it.
-func noneConverterCRD(group string) *apiextensionsv1.CustomResourceDefinition {
-	objSchema := apiextensionsv1.CustomResourceValidation{
+// widgetCRD builds a single-version CRD for the given group/version with a spec and a
+// status property. The status schema is identical across versions so that
+// generation.StatusEqual passes and ApplyOrUpdateCRD takes the AppendVersion +
+// injectConversionConfToCRD path on the second apply.
+func widgetCRD(group, version string) *apiextensionsv1.CustomResourceDefinition {
+	schema := apiextensionsv1.CustomResourceValidation{
 		OpenAPIV3Schema: &apiextensionsv1.JSONSchemaProps{
 			Type: "object",
 			Properties: map[string]apiextensionsv1.JSONSchemaProps{
-				"spec": {Type: "object", XPreserveUnknownFields: ptrBool(true)},
+				"spec":   {Type: "object", XPreserveUnknownFields: ptrBool(true)},
+				"status": {Type: "object", XPreserveUnknownFields: ptrBool(true)},
 			},
 		},
 	}
 	return &apiextensionsv1.CustomResourceDefinition{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "apiextensions.k8s.io/v1",
+			Kind:       "CustomResourceDefinition",
+		},
 		ObjectMeta: metav1.ObjectMeta{Name: "widgets." + group},
 		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
 			Group: group,
@@ -167,11 +191,7 @@ func noneConverterCRD(group string) *apiextensionsv1.CustomResourceDefinition {
 			},
 			Scope: apiextensionsv1.NamespaceScoped,
 			Versions: []apiextensionsv1.CustomResourceDefinitionVersion{
-				{Name: "v1alpha1", Served: true, Storage: true, Schema: &objSchema},
-				{Name: "v1alpha2", Served: true, Storage: false, Schema: &objSchema},
-			},
-			Conversion: &apiextensionsv1.CustomResourceConversion{
-				Strategy: apiextensionsv1.NoneConverter,
+				{Name: version, Served: true, Storage: true, Schema: &schema},
 			},
 		},
 	}
