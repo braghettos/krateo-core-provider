@@ -135,21 +135,6 @@ func isRetryableCRDError(err error) bool {
 	return true
 }
 
-type ApplyOpts struct {
-	CABundle                []byte
-	WebhookServiceNamespace string
-	WebhookServiceName      string
-
-	// Remote indicates the CRD is being applied to a remote target cluster, whose API
-	// server cannot reach the management cluster's in-cluster webhook Service.
-	Remote bool
-	// WebhookURL is the externally reachable conversion endpoint used for remote targets
-	// instead of the in-cluster Service. When Remote is true and WebhookURL is empty,
-	// conversion is disabled (NoneConverter) rather than registering an unreachable
-	// Service webhook.
-	WebhookURL string
-}
-
 // UpdateVersion updates the given CRD to set the given version spec. If the version
 // does not exist, the CRD is created
 // If the version exists, its specs are updated
@@ -159,7 +144,6 @@ func ApplyOrUpdateCRD(ctx context.Context,
 	cli client.Client,
 	dyn dynamic.Interface,
 	newcrd *apiextensionsv1.CustomResourceDefinition,
-	opts ApplyOpts,
 ) (schema.GroupVersionResource, error) {
 
 	log := contexttools.LoggerFromCtx(ctx, logging.NewNopLogger())
@@ -235,21 +219,12 @@ func ApplyOrUpdateCRD(ctx context.Context,
 		return gvr, fmt.Errorf("error appending version to CRD: %w", err)
 	}
 
-	// Service-based conversion (local targets) requires the in-cluster webhook Service
-	// coordinates and CA bundle. Remote targets use a URL-based webhook or no conversion,
-	// so those guards do not apply.
-	if !opts.Remote {
-		if opts.CABundle == nil {
-			return gvr, fmt.Errorf("CA bundle is nil")
-		}
-		if opts.WebhookServiceName == "" {
-			return gvr, fmt.Errorf("webhook service name is empty")
-		}
-		if opts.WebhookServiceNamespace == "" {
-			return gvr, fmt.Errorf("webhook service namespace is empty")
-		}
-	}
-	injectConversionConfToCRD(crd, opts)
+	// The generated CRD's served versions are all schema-passthrough (the old conversion
+	// webhook only copied metadata/spec/status verbatim), so the built-in None converter
+	// is equivalent and needs no webhook to reach. Lossless storage across heterogeneous
+	// version schemas is provided by the permissive "vacuum" storage version, not by
+	// conversion. This works identically for local and remote targets.
+	setNoneConversion(crd)
 
 	generation.SetServedStorage(crd, gvr.Version, true, false)
 	err = kube.Apply(ctx, cli, crd, kube.ApplyOptions{})
@@ -269,55 +244,10 @@ func ApplyOrUpdateCRD(ctx context.Context,
 	return gvr, nil
 }
 
-func injectConversionConfToCRD(crd *apiextensionsv1.CustomResourceDefinition, opts ApplyOpts) {
-	whport := int32(9443)
-	whpath := "/convert"
-	reviewVersions := []string{"v1", "v1alpha1", "v1alpha2"}
-
-	if opts.Remote {
-		// The remote API server cannot resolve the management cluster's in-cluster
-		// webhook Service. Use a URL-based webhook when an externally reachable endpoint
-		// is configured; otherwise disable conversion (a Service-based webhook would be
-		// unreachable and break every request that needs conversion).
-		if opts.WebhookURL == "" {
-			crd.Spec.Conversion = &apiextensionsv1.CustomResourceConversion{
-				Strategy: apiextensionsv1.NoneConverter,
-			}
-			return
-		}
-		url := strings.TrimRight(opts.WebhookURL, "/")
-		if !strings.HasSuffix(url, whpath) {
-			url += whpath
-		}
-		crd.Spec.Conversion = &apiextensionsv1.CustomResourceConversion{
-			Strategy: apiextensionsv1.WebhookConverter,
-			Webhook: &apiextensionsv1.WebhookConversion{
-				ConversionReviewVersions: reviewVersions,
-				ClientConfig: &apiextensionsv1.WebhookClientConfig{
-					URL:      &url,
-					CABundle: opts.CABundle,
-				},
-			},
-		}
-		return
+func setNoneConversion(crd *apiextensionsv1.CustomResourceDefinition) {
+	crd.Spec.Conversion = &apiextensionsv1.CustomResourceConversion{
+		Strategy: apiextensionsv1.NoneConverter,
 	}
-
-	conf := &apiextensionsv1.CustomResourceConversion{
-		Strategy: apiextensionsv1.WebhookConverter,
-		Webhook: &apiextensionsv1.WebhookConversion{
-			ConversionReviewVersions: reviewVersions,
-			ClientConfig: &apiextensionsv1.WebhookClientConfig{
-				Service: &apiextensionsv1.ServiceReference{
-					Namespace: opts.WebhookServiceNamespace,
-					Name:      opts.WebhookServiceName,
-					Port:      &whport,
-					Path:      &whpath,
-				},
-				CABundle: opts.CABundle,
-			},
-		},
-	}
-	crd.Spec.Conversion = conf
 }
 
 func IsReady(crd *apiextensionsv1.CustomResourceDefinition) bool {

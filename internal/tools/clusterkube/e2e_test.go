@@ -110,9 +110,8 @@ func TestE2E_RemoteTargeting(t *testing.T) {
 
 	// 4. Drive the REAL feature helper crd.ApplyOrUpdateCRD against the remote target,
 	//    exactly as Create()/Update() do. First a single version creates the CRD; a second
-	//    version exercises the AppendVersion + injectConversionConfToCRD remote path, which
-	//    must produce a NoneConverter (no CORE_PROVIDER_WEBHOOK_URL) the real apiserver
-	//    accepts and establishes.
+	//    version exercises the AppendVersion path, which sets the None converter the real
+	//    apiserver accepts and establishes.
 	group := fmt.Sprintf("e2e%s.krateo.io", uniqueSuffix())
 	crdName := "widgets." + group
 	t.Cleanup(func() {
@@ -121,11 +120,10 @@ func TestE2E_RemoteTargeting(t *testing.T) {
 		_ = clients.Kube.Delete(ctx, c)
 	})
 
-	opts := crdclient.ApplyOpts{Remote: true} // remote, no webhook URL -> NoneConverter
-	if _, err := crdclient.ApplyOrUpdateCRD(ctx, clients.Kube, clients.Dynamic, widgetCRD(group, "v1alpha1"), opts); err != nil {
+	if _, err := crdclient.ApplyOrUpdateCRD(ctx, clients.Kube, clients.Dynamic, widgetCRD(group, "v1alpha1")); err != nil {
 		t.Fatalf("ApplyOrUpdateCRD (v1alpha1) on target: %v", err)
 	}
-	if _, err := crdclient.ApplyOrUpdateCRD(ctx, clients.Kube, clients.Dynamic, widgetCRD(group, "v1alpha2"), opts); err != nil {
+	if _, err := crdclient.ApplyOrUpdateCRD(ctx, clients.Kube, clients.Dynamic, widgetCRD(group, "v1alpha2")); err != nil {
 		t.Fatalf("ApplyOrUpdateCRD (v1alpha2) on target: %v", err)
 	}
 

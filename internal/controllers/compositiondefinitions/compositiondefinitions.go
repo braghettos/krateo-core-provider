@@ -64,13 +64,6 @@ var (
 	JSONSchemaTemplateConfigmapPath = filepath.Join(os.TempDir(), "assets/json-schema-configmap/configmap.yaml")
 	ServiceTemplatePath             = filepath.Join(os.TempDir(), "assets/cdc-service/service.yaml")
 	CertsPath                       = filepath.Join(os.TempDir(), "k8s-webhook-server", "serving-certs")
-
-	// webhookURL, when set, is the externally reachable base URL of core-provider's
-	// conversion endpoint. It enables multi-version conversion for CRDs deployed to
-	// remote target clusters, whose API servers cannot resolve the in-cluster webhook
-	// Service of the management cluster. When empty, remote multi-version CRDs are
-	// installed with NoneConverter.
-	webhookURL = os.Getenv("CORE_PROVIDER_WEBHOOK_URL")
 )
 
 type Options struct {
@@ -582,19 +575,13 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) error {
 		return fmt.Errorf("error generating CRD: crd is nil")
 	}
 
-	gvr, err := crdclient.ApplyOrUpdateCRD(ctx, e.kube, e.dynamic, crd, crdclient.ApplyOpts{
-		CABundle:                e.certManager.GetCABundle(),
-		WebhookServiceNamespace: e.certManager.GetServiceNamespace(),
-		WebhookServiceName:      e.certManager.GetServiceName(),
-		Remote:                  e.remote,
-		WebhookURL:              webhookURL,
-	})
+	gvr, err := crdclient.ApplyOrUpdateCRD(ctx, e.kube, e.dynamic, crd)
 	if err != nil {
 		return fmt.Errorf("error applying or updating CRD: %w", err)
 	}
-	// CA-bundle/certificate management targets the management cluster's webhook Service
-	// and the local CRD's Service-based conversion config; it does not apply to a remote
-	// target (which uses a URL-based or no conversion webhook).
+	// certManager manages the management cluster's webhook serving cert and the mutating
+	// webhook CA bundle. It does not apply to a remote target, whose generated CRD lives
+	// in the target and uses None conversion (no webhook).
 	if !e.remote {
 		if err := e.certManager.ManageCertificates(ctx, gvr); err != nil {
 			return fmt.Errorf("error managing certificates after CRD apply: %w", err)
@@ -668,13 +655,7 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 		return fmt.Errorf("error generating CRD: crd is nil")
 	}
 
-	gvr, err := crdclient.ApplyOrUpdateCRD(ctx, e.kube, e.dynamic, crd, crdclient.ApplyOpts{
-		CABundle:                e.certManager.GetCABundle(),
-		WebhookServiceNamespace: e.certManager.GetServiceNamespace(),
-		WebhookServiceName:      e.certManager.GetServiceName(),
-		Remote:                  e.remote,
-		WebhookURL:              webhookURL,
-	})
+	gvr, err := crdclient.ApplyOrUpdateCRD(ctx, e.kube, e.dynamic, crd)
 	if err != nil {
 		return fmt.Errorf("error applying or updating CRD: %w", err)
 	}

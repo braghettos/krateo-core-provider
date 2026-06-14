@@ -22,14 +22,12 @@ var statusJsonSchema []byte
 var emptyJsonSchema []byte
 
 func UpdateCABundle(crd *apiextensionsv1.CustomResourceDefinition, caBundle []byte) error {
-	if crd.Spec.Conversion == nil {
-		return fmt.Errorf(".spec.conversion field is nil")
-	}
-	if crd.Spec.Conversion.Webhook == nil {
-		return fmt.Errorf(".spec.conversion.webhook field is nil")
-	}
-	if crd.Spec.Conversion.Webhook.ClientConfig == nil {
-		return fmt.Errorf(".spec.conversion.webhook.clientConfig field is nil")
+	// Generated CRDs use the None conversion strategy (no webhook), so there is no
+	// conversion CA bundle to propagate - skip rather than error.
+	if crd.Spec.Conversion == nil ||
+		crd.Spec.Conversion.Webhook == nil ||
+		crd.Spec.Conversion.Webhook.ClientConfig == nil {
+		return nil
 	}
 
 	crd.Spec.Conversion.Webhook.ClientConfig.CABundle = caBundle

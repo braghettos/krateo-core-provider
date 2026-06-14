@@ -469,25 +469,34 @@ func TestUpdateCABundle(t *testing.T) {
 			},
 		},
 		{
-			name: "Nil Conversion field",
+			// None-converter CRDs have no conversion webhook to propagate to: skip, no error.
+			name: "Nil Conversion field skips",
 			crd: &apiextensionsv1.CustomResourceDefinition{
 				Spec: apiextensionsv1.CustomResourceDefinitionSpec{},
 			},
 			caBundle:  []byte("test-ca-bundle"),
-			expectErr: true,
+			expectErr: false,
+			expected: &apiextensionsv1.CustomResourceDefinition{
+				Spec: apiextensionsv1.CustomResourceDefinitionSpec{},
+			},
 		},
 		{
-			name: "Nil Webhook field",
+			name: "Nil Webhook field skips",
 			crd: &apiextensionsv1.CustomResourceDefinition{
 				Spec: apiextensionsv1.CustomResourceDefinitionSpec{
 					Conversion: &apiextensionsv1.CustomResourceConversion{},
 				},
 			},
 			caBundle:  []byte("test-ca-bundle"),
-			expectErr: true,
+			expectErr: false,
+			expected: &apiextensionsv1.CustomResourceDefinition{
+				Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+					Conversion: &apiextensionsv1.CustomResourceConversion{},
+				},
+			},
 		},
 		{
-			name: "Nil ClientConfig field",
+			name: "Nil ClientConfig field skips",
 			crd: &apiextensionsv1.CustomResourceDefinition{
 				Spec: apiextensionsv1.CustomResourceDefinitionSpec{
 					Conversion: &apiextensionsv1.CustomResourceConversion{
@@ -496,7 +505,14 @@ func TestUpdateCABundle(t *testing.T) {
 				},
 			},
 			caBundle:  []byte("test-ca-bundle"),
-			expectErr: true,
+			expectErr: false,
+			expected: &apiextensionsv1.CustomResourceDefinition{
+				Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+					Conversion: &apiextensionsv1.CustomResourceConversion{
+						Webhook: &apiextensionsv1.WebhookConversion{},
+					},
+				},
+			},
 		},
 	}
 

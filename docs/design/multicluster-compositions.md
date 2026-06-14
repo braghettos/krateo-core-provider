@@ -20,16 +20,19 @@
 > mode/connectionStatus/version/kubeconfigSecretResourceVersion. Watches on Secret and
 > KubernetesTarget re-reconcile on credential rotation / target repoint.
 >
-> **Conversion webhook (resolved):** conversion config is target-aware in
-> `crd.ApplyOrUpdateCRD` via `ApplyOpts{Remote, WebhookURL}` (`injectConversionConfToCRD`).
-> Local targets use the in-cluster webhook Service (unchanged). Remote targets use a
-> **URL-based** webhook when `CORE_PROVIDER_WEBHOOK_URL` (the externally reachable
-> `/convert` endpoint) is set; otherwise they fall back to `NoneConverter` — strictly
-> safer than an unreachable Service webhook. `certManager.ManageCertificates` (which
-> propagates the CA bundle to the in-cluster Service webhook) is **skipped for remote
-> targets**. To enable full multi-version conversion remotely, expose core-provider's
-> conversion endpoint and set `CORE_PROVIDER_WEBHOOK_URL` (its TLS cert must match the
-> served CA bundle). Projecting a conversion endpoint into the target is a follow-up.
+> **Conversion: dropped the webhook, use `None` (resolved 2026-06-14).** The conversion
+> webhook handler was a pure passthrough — it copied `metadata`/`spec`/`status` verbatim
+> and only relabeled `apiVersion`, which is exactly what Kubernetes' built-in `None`
+> converter does. So generated CRDs now use `strategy: None` for **both local and
+> remote** targets (`crd.setNoneConversion`); no webhook is registered on any CRD. This
+> **dissolves the whole cross-cluster conversion problem** — there is nothing to deploy
+> into a remote target, no per-target cert, no `CORE_PROVIDER_WEBHOOK_URL`. The permissive
+> **`vacuum` storage version** still provides lossless storage across heterogeneous
+> per-version schemas (orthogonal to conversion). Verified on kind: a `None` + vacuum CRD
+> with heterogeneous v1/v2 schemas establishes, and an object created under v1 round-trips
+> losslessly through storage. `certManager` still runs for the `/mutate` webhook;
+> `UpdateCABundle` skips when a CRD has no conversion webhook. (Removing the now-dead
+> `/convert` endpoint + `webhooks/conversion` package is a follow-up cleanup.)
 >
 > **e2e-validated (2026-06-13):** the remote-targeting path was exercised against real
 > clusters — a kind management cluster + a disposable single-node GKE target, with a
@@ -335,11 +338,10 @@ into the target.
 
 **Remaining risks / to validate during Phase 1:**
 
-- **Webhook conversion reachability.** ✅ *Resolved* via `conversionConfFor` — remote
-  targets use a URL-based webhook (`CORE_PROVIDER_WEBHOOK_URL`) or fall back to
-  `NoneConverter` with a warning. Remaining follow-up: option (b) — projecting a
-  conversion endpoint *into* the target — would remove the dependency on an externally
-  reachable management URL, but is deferred (pairs with the in-target drift agent work).
+- **Webhook conversion reachability.** ✅ *Dissolved* — the conversion webhook was a
+  passthrough equivalent to `None`, so generated CRDs now use `strategy: None` (local and
+  remote) and no conversion webhook exists. There is no reachability problem to solve and
+  no in-target conversion component to deploy.
 - **CDC ↔ management connectivity.** Confirm the in-target CDC needs nothing from the
   management cluster at steady state (it shouldn't). If it reports status back, that's a
   back-channel to design.
