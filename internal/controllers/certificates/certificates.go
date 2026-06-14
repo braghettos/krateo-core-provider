@@ -190,7 +190,7 @@ func (m *CertManager) UpdateExistingResources(ctx context.Context) error {
 			if err != nil {
 				return fmt.Errorf("error updating CA bundle for GVR %s: %w", gvr.String(), err)
 			}
-			m.log("Updated CA bundle for CRD and MutatingWebhookConfiguration", "GVR", gvr.String())
+			m.log("Updated CA bundle for MutatingWebhookConfiguration", "GVR", gvr.String())
 		}
 	}
 	return nil
