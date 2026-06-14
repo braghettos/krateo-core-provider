@@ -12,11 +12,8 @@ import (
 	"github.com/krateoplatformops/plumbing/kubeutil/eventrecorder"
 
 	compositiondefinitionsv1alpha1 "github.com/krateoplatformops/core-provider/apis/compositiondefinitions/v1alpha1"
-	"github.com/krateoplatformops/core-provider/internal/controllers/certificates"
 	"github.com/krateoplatformops/core-provider/internal/controllers/compositiondefinitions/helpers/getters"
 	"github.com/krateoplatformops/core-provider/internal/controllers/compositiondefinitions/helpers/status"
-	"github.com/krateoplatformops/core-provider/internal/controllers/compositiondefinitions/webhooks/mutation"
-	webhooktelemetry "github.com/krateoplatformops/core-provider/internal/telemetry/webhooks"
 	"github.com/krateoplatformops/core-provider/internal/tools/chart"
 	"github.com/krateoplatformops/core-provider/internal/tools/chart/chartfs"
 	"github.com/krateoplatformops/core-provider/internal/tools/clusterkube"
@@ -58,20 +55,15 @@ var (
 	CDCtemplateDeploymentPath       = filepath.Join(os.TempDir(), "assets/cdc-deployment/deployment.yaml")
 	CDCtemplateConfigmapPath        = filepath.Join(os.TempDir(), "assets/cdc-configmap/configmap.yaml")
 	CDCrbacConfigFolder             = filepath.Join(os.TempDir(), "assets/cdc-rbac/")
-	MutatingWebhookPath             = filepath.Join(os.TempDir(), "assets/mutating-webhook-configuration/mutating-webhook.yaml")
 	JSONSchemaTemplateConfigmapPath = filepath.Join(os.TempDir(), "assets/json-schema-configmap/configmap.yaml")
 	ServiceTemplatePath             = filepath.Join(os.TempDir(), "assets/cdc-service/service.yaml")
-	CertsPath                       = filepath.Join(os.TempDir(), "k8s-webhook-server", "serving-certs")
 )
 
 type Options struct {
 	ControllerOptions controller.Options
 	// Metrics records reconcile telemetry for the CompositionDefinition controller.
-	Metrics                 reconciler.MetricsRecorder
-	WebhookMetrics          *webhooktelemetry.Metrics
-	CertManager             certificates.CertManagerInterface
-	Pluralizer              pluralizerlib.PluralizerInterface
-	CertificateSyncInterval time.Duration
+	Metrics    reconciler.MetricsRecorder
+	Pluralizer pluralizerlib.PluralizerInterface
 }
 
 func Setup(mgr ctrl.Manager, o Options) error {
@@ -90,7 +82,6 @@ func Setup(mgr ctrl.Manager, o Options) error {
 	}
 
 	cli := mgr.GetClient()
-	apiReader := mgr.GetAPIReader()
 
 	// Cleanup: Remove obsolete label for backward compatibility on startup
 	// This handles CompositionDefinitions created before the removal of the still-exist-compositions-finalizer
@@ -100,19 +91,20 @@ func Setup(mgr ctrl.Manager, o Options) error {
 		l.Debug("Failed to cleanup obsolete finalizer labels on startup", "error", err)
 	}
 
-	// Generated CRDs use the None conversion strategy, so no /convert webhook is needed.
-	mgr.GetWebhookServer().Register("/mutate", mutation.NewWebhookHandler(apiReader, o.WebhookMetrics))
+	// core-provider hosts no admission webhooks: generated CRDs use None conversion, and
+	// the composition-version label is stamped by a MutatingAdmissionPolicy shipped
+	// declaratively by the chart (it must exist in every cluster a composition CRD lives
+	// in, including remote targets; requires Kubernetes >= 1.36).
 
 	r := reconciler.NewReconciler(mgr,
 		resource.ManagedKind(compositiondefinitionsv1alpha1.CompositionDefinitionGroupVersionKind),
 		reconciler.WithExternalConnecter(&connector{
-			client:      kubernetes.NewForConfigOrDie(mgr.GetConfig()),
-			dynamic:     dynamic.NewForConfigOrDie(mgr.GetConfig()),
-			kube:        cli,
-			log:         l,
-			recorder:    recorder,
-			pluralizer:  o.Pluralizer,
-			certManager: o.CertManager,
+			client:     kubernetes.NewForConfigOrDie(mgr.GetConfig()),
+			dynamic:    dynamic.NewForConfigOrDie(mgr.GetConfig()),
+			kube:       cli,
+			log:        l,
+			recorder:   recorder,
+			pluralizer: o.Pluralizer,
 		}),
 		reconciler.WithTimeout(reconcileTimeout),
 		reconciler.WithPollInterval(o.ControllerOptions.PollInterval),
@@ -121,26 +113,6 @@ func Setup(mgr ctrl.Manager, o Options) error {
 		reconciler.WithRecorder(event.NewAPIRecorder(recorder)),
 		reconciler.WithThrottledRecorder(event.NewAPIRecorder(throttledRecorder)),
 	)
-
-	// Perform an eager CA bundle propagation before the manager starts.
-	// This keeps webhook configuration in sync during startup and avoids
-	// a readiness window where admission can hit stale or missing CA data.
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-	if err := o.CertManager.UpdateExistingResources(ctx); err != nil {
-		return fmt.Errorf("error updating existing resources with CA bundle during setup: %w", err)
-	}
-
-	// Setup certificate reconciler as a separate runnable
-	certReconciler := certificates.NewCertificateReconciler(
-		o.CertManager,
-		o.Pluralizer,
-		l,
-		o.CertificateSyncInterval,
-	)
-	if err := mgr.Add(certReconciler); err != nil {
-		return fmt.Errorf("error adding certificate reconciler to manager: %w", err)
-	}
 
 	return ctrl.NewControllerManagedBy(mgr).
 		Named(name).
@@ -279,13 +251,12 @@ func cleanupObsoleteFinalizerLabels(ctx context.Context, kube client.Client, log
 }
 
 type connector struct {
-	dynamic     dynamic.Interface
-	client      kubernetes.Interface
-	kube        client.Client
-	log         logging.Logger
-	recorder    record.EventRecorder
-	pluralizer  pluralizerlib.PluralizerInterface
-	certManager certificates.CertManagerInterface
+	dynamic    dynamic.Interface
+	client     kubernetes.Interface
+	kube       client.Client
+	log        logging.Logger
+	recorder   record.EventRecorder
+	pluralizer pluralizerlib.PluralizerInterface
 }
 
 func (c *connector) Connect(ctx context.Context, mg resource.Managed) (reconciler.ExternalClient, error) {
@@ -297,14 +268,13 @@ func (c *connector) Connect(ctx context.Context, mg resource.Managed) (reconcile
 	log := c.log.WithValues("name", cr.Name, "namespace", cr.Namespace)
 
 	ext := &external{
-		mgmt:        c.kube,
-		kube:        c.kube,
-		dynamic:     c.dynamic,
-		client:      c.client,
-		log:         log,
-		rec:         c.recorder,
-		pluralizer:  c.pluralizer,
-		certManager: c.certManager,
+		mgmt:       c.kube,
+		kube:       c.kube,
+		dynamic:    c.dynamic,
+		client:     c.client,
+		log:        log,
+		rec:        c.recorder,
+		pluralizer: c.pluralizer,
 	}
 
 	// When the CompositionDefinition targets a remote cluster, the generated CRD, its
@@ -333,13 +303,12 @@ type external struct {
 	mgmt client.Client
 	// kube, dynamic and client target the cluster where the generated CRD, RBAC and the
 	// composition-dynamic-controller are deployed (local == mgmt, or a remote target).
-	dynamic     dynamic.Interface
-	kube        client.Client
-	client      kubernetes.Interface
-	log         logging.Logger
-	rec         record.EventRecorder
-	pluralizer  pluralizerlib.PluralizerInterface
-	certManager certificates.CertManagerInterface
+	dynamic    dynamic.Interface
+	kube       client.Client
+	client     kubernetes.Interface
+	log        logging.Logger
+	rec        record.EventRecorder
+	pluralizer pluralizerlib.PluralizerInterface
 
 	// remote is true when the target is a remote cluster; secretResourceVersion is the
 	// resourceVersion of the kubeconfig Secret used to reach it.
@@ -576,14 +545,6 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) error {
 	if err != nil {
 		return fmt.Errorf("error applying or updating CRD: %w", err)
 	}
-	// certManager manages the management cluster's webhook serving cert and the mutating
-	// webhook CA bundle. It does not apply to a remote target, whose generated CRD lives
-	// in the target and uses None conversion (no webhook).
-	if !e.remote {
-		if err := e.certManager.ManageCertificates(ctx, gvr); err != nil {
-			return fmt.Errorf("error managing certificates after CRD apply: %w", err)
-		}
-	}
 
 	opts := deploy.DeployOptions{
 		RBACFolderPath:         CDCrbacConfigFolder,
@@ -655,12 +616,6 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 	gvr, err := crdclient.ApplyOrUpdateCRD(ctx, e.kube, e.dynamic, crd)
 	if err != nil {
 		return fmt.Errorf("error applying or updating CRD: %w", err)
-	}
-	// See Create: certificate management does not apply to remote targets.
-	if !e.remote {
-		if err := e.certManager.ManageCertificates(ctx, gvr); err != nil {
-			return fmt.Errorf("error managing certificates after CRD update: %w", err)
-		}
 	}
 
 	opts := deploy.DeployOptions{
