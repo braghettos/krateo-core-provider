@@ -20,8 +20,6 @@ For average duration, use the generated `_sum` and `_count` series instead of `_
 | `provider_runtime.reconcile.queue.oldest_item_age_seconds` | Histogram | seconds | Age of the oldest queued item observed at enqueue/dequeue time. | `provider-runtime/pkg/controller/queue_wait.go` | `histogram_quantile(0.95, sum by (le) (rate(provider_runtime_reconcile_queue_oldest_item_age_seconds_bucket[5m])))` |
 | `provider_runtime.reconcile.queue.work.duration_seconds` | Histogram | seconds | Time spent processing a dequeued item before `Done()`. | `provider-runtime/pkg/controller/queue_wait.go` | `histogram_quantile(0.95, sum by (le) (rate(provider_runtime_reconcile_queue_work_duration_seconds_bucket[5m])))` |
 | `provider_runtime.reconcile.queue.requeues` | Counter | count | Total queue requeues grouped by reason. | `provider-runtime/pkg/telemetry/metrics.go` | `sum(increase(provider_runtime_reconcile_queue_requeues_total[1h]))` |
-| `core_provider.webhook.request.duration_seconds` | Histogram | seconds | Duration of mutating and conversion webhook requests. | `internal/telemetry/webhooks/metrics.go` | `sum(rate(core_provider_webhook_request_duration_seconds_sum{webhook="mutating"}[5m])) / sum(rate(core_provider_webhook_request_duration_seconds_count{webhook="mutating"}[5m]))` |
-| `core_provider.webhook.request.total` | Counter | count | Total webhook requests grouped by webhook, operation, and outcome. | `internal/telemetry/webhooks/metrics.go` | `sum(increase(core_provider_webhook_request_total{webhook="conversion"}[1h]))` |
 | `provider_runtime.external.connect.duration_seconds` | Histogram | seconds | Time spent reading external references. | `provider-runtime/pkg/telemetry/metrics.go` | `sum(rate(provider_runtime_external_connect_duration_seconds_sum[5m])) / sum(rate(provider_runtime_external_connect_duration_seconds_count[5m]))` |
 | `provider_runtime.external.observe.duration_seconds` | Histogram | seconds | Time spent observing external resources. | `provider-runtime/pkg/telemetry/metrics.go` | `sum(rate(provider_runtime_external_observe_duration_seconds_sum[5m])) / sum(rate(provider_runtime_external_observe_duration_seconds_count[5m]))` |
 | `provider_runtime.finalizer.add.duration_seconds` | Histogram | seconds | Time spent adding finalizers. | `provider-runtime/pkg/telemetry/metrics.go` | `histogram_quantile(0.95, sum by (le) (rate(provider_runtime_finalizer_add_duration_seconds_bucket[5m])))` |
@@ -34,8 +32,7 @@ For average duration, use the generated `_sum` and `_count` series instead of `_
 
 - The manager metrics endpoint on `:8080` still exposes controller-runtime defaults.
 - The custom provider-runtime metrics are exported via OTLP when `--otel-enabled` is set.
-- The webhook metrics are emitted by `core-provider` and flow through the same OTLP pipeline.
-- Webhook metrics are request-driven, so the Grafana panels remain empty until the admission webhooks receive actual mutating or conversion traffic.
-- The dashboard splits webhook panels by `webhook="mutating"` and `webhook="conversion"` so each admission path is easier to inspect.
-- If `OTEL_ENABLED` is false or the OTLP endpoint is unreachable, webhook metrics will not reach Prometheus/Grafana.
+- `core-provider` no longer hosts admission webhooks (since 2.0.0), so there are no webhook
+  metrics: generated CRDs use `None` conversion and the composition-version label is stamped
+  in-apiserver by a `MutatingAdmissionPolicy`, neither of which emits provider metrics.
 - Avoid high-cardinality labels for queue metrics.
