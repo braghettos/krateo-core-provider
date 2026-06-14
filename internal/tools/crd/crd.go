@@ -91,6 +91,11 @@ func Get(ctx context.Context, kube client.Reader, gr schema.GroupResource) (*api
 		}
 	}
 
+	// Typed reads do not always populate TypeMeta (notably with the direct, non-cached
+	// client used for remote targets). Downstream apply derives the GVK from the object,
+	// so set it explicitly to keep CRD updates working regardless of the client.
+	res.SetGroupVersionKind(apiextensionsv1.SchemeGroupVersion.WithKind("CustomResourceDefinition"))
+
 	return &res, nil
 }
 
@@ -130,12 +135,6 @@ func isRetryableCRDError(err error) bool {
 	return true
 }
 
-type ApplyOpts struct {
-	CABundle                []byte
-	WebhookServiceNamespace string
-	WebhookServiceName      string
-}
-
 // UpdateVersion updates the given CRD to set the given version spec. If the version
 // does not exist, the CRD is created
 // If the version exists, its specs are updated
@@ -145,7 +144,6 @@ func ApplyOrUpdateCRD(ctx context.Context,
 	cli client.Client,
 	dyn dynamic.Interface,
 	newcrd *apiextensionsv1.CustomResourceDefinition,
-	opts ApplyOpts,
 ) (schema.GroupVersionResource, error) {
 
 	log := contexttools.LoggerFromCtx(ctx, logging.NewNopLogger())
@@ -221,16 +219,12 @@ func ApplyOrUpdateCRD(ctx context.Context,
 		return gvr, fmt.Errorf("error appending version to CRD: %w", err)
 	}
 
-	if opts.CABundle == nil {
-		return gvr, fmt.Errorf("CA bundle is nil")
-	}
-	if opts.WebhookServiceName == "" {
-		return gvr, fmt.Errorf("webhook service name is empty")
-	}
-	if opts.WebhookServiceNamespace == "" {
-		return gvr, fmt.Errorf("webhook service namespace is empty")
-	}
-	injectConversionConfToCRD(crd, opts)
+	// The generated CRD's served versions are all schema-passthrough (the old conversion
+	// webhook only copied metadata/spec/status verbatim), so the built-in None converter
+	// is equivalent and needs no webhook to reach. Lossless storage across heterogeneous
+	// version schemas is provided by the permissive "vacuum" storage version, not by
+	// conversion. This works identically for local and remote targets.
+	setNoneConversion(crd)
 
 	generation.SetServedStorage(crd, gvr.Version, true, false)
 	err = kube.Apply(ctx, cli, crd, kube.ApplyOptions{})
@@ -250,25 +244,10 @@ func ApplyOrUpdateCRD(ctx context.Context,
 	return gvr, nil
 }
 
-func injectConversionConfToCRD(crd *apiextensionsv1.CustomResourceDefinition, opts ApplyOpts) {
-	whport := int32(9443)
-	whpath := "/convert"
-	conf := &apiextensionsv1.CustomResourceConversion{
-		Strategy: apiextensionsv1.WebhookConverter,
-		Webhook: &apiextensionsv1.WebhookConversion{
-			ConversionReviewVersions: []string{"v1", "v1alpha1", "v1alpha2"},
-			ClientConfig: &apiextensionsv1.WebhookClientConfig{
-				Service: &apiextensionsv1.ServiceReference{
-					Namespace: opts.WebhookServiceNamespace,
-					Name:      opts.WebhookServiceName,
-					Port:      &whport,
-					Path:      &whpath,
-				},
-				CABundle: opts.CABundle,
-			},
-		},
+func setNoneConversion(crd *apiextensionsv1.CustomResourceDefinition) {
+	crd.Spec.Conversion = &apiextensionsv1.CustomResourceConversion{
+		Strategy: apiextensionsv1.NoneConverter,
 	}
-	crd.Spec.Conversion = conf
 }
 
 func IsReady(crd *apiextensionsv1.CustomResourceDefinition) bool {

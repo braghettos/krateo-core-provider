@@ -1,0 +1,38 @@
+# A cluster-scoped KubernetesTarget describing a remote cluster, referenced by name from
+# a CompositionDefinition's spec.deploy.targetRef. Its kubeconfig is read from a native
+# Secret (populate/rotate with External Secrets Operator).
+apiVersion: core.krateo.io/v1alpha1
+kind: KubernetesTarget
+metadata:
+  name: prod-eu
+spec:
+  kubeconfigRef:
+    name: prod-eu-kubeconfig
+    namespace: krateo-system
+    key: kubeconfig
+---
+apiVersion: core.krateo.io/v1alpha1
+kind: CompositionDefinition
+metadata:
+  annotations:
+    "krateo.io/connector-verbose": "true"
+  name: fireworksapp-remote
+  namespace: demo-system
+spec:
+  chart:
+    url: https://github.com/krateoplatformops/krateo-v2-template-fireworksapp/releases/download/0.1.0/fireworks-app-0.1.0.tgz
+  # Deploy the generated CRD, its RBAC and the composition-dynamic-controller into the
+  # remote cluster described by the 'prod-eu' KubernetesTarget.
+  deploy:
+    targetRef:
+      name: prod-eu
+---
+# Local deployment is the default: omit spec.deploy entirely (shown here for contrast).
+apiVersion: core.krateo.io/v1alpha1
+kind: CompositionDefinition
+metadata:
+  name: fireworksapp-local
+  namespace: demo-system
+spec:
+  chart:
+    url: https://github.com/krateoplatformops/krateo-v2-template-fireworksapp/releases/download/0.1.0/fireworks-app-0.1.0.tgz

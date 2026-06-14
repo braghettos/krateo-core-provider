@@ -40,6 +40,14 @@ spec:
       name: PACKAGE URL
       priority: 10
       type: string
+    - jsonPath: .status.target.mode
+      name: TARGET
+      priority: 10
+      type: string
+    - jsonPath: .status.target.connectionStatus
+      name: CONNECTION
+      priority: 10
+      type: string
     name: v1alpha1
     schema:
       openAPIV3Schema:
@@ -123,6 +131,25 @@ spec:
                   rule: '!has(oldSelf.version) || has(self.version)'
                 - message: Repo is required once set
                   rule: '!has(oldSelf.repo) || has(self.repo)'
+              deploy:
+                description: |-
+                  Deploy: selects whether the composition-dynamic-controller (and the generated
+                  CRD and RBAC) are deployed locally in the management cluster (the default) or to
+                  a remote target cluster referenced by a KubernetesTarget. When omitted, deployment
+                  is local.
+                properties:
+                  targetRef:
+                    description: |-
+                      TargetRef references a cluster-scoped KubernetesTarget describing the remote
+                      cluster to deploy to. When omitted, deployment is local.
+                    properties:
+                      name:
+                        description: Name of the cluster-scoped KubernetesTarget.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                type: object
             type: object
           status:
             description: CompositionDefinitionStatus is the status of a CompositionDefinition.
@@ -257,6 +284,28 @@ spec:
                 description: 'Resource: the resource of the custom resource - Last
                   applied resource'
                 type: string
+              target:
+                description: 'Target: information about the cluster the controller
+                  is deployed to.'
+                properties:
+                  connectionStatus:
+                    description: 'ConnectionStatus: Healthy when the target cluster
+                      is reachable, Down otherwise.'
+                    type: string
+                  kubeconfigSecretResourceVersion:
+                    description: |-
+                      KubeconfigSecretResourceVersion: the resourceVersion of the kubeconfig Secret last
+                      used to reach a remote target, for credential-rotation traceability.
+                    type: string
+                  mode:
+                    description: 'Mode: where the controller is deployed (Local or
+                      Remote).'
+                    type: string
+                  version:
+                    description: 'Version: the Kubernetes version reported by the
+                      target cluster.'
+                    type: string
+                type: object
             type: object
         type: object
     served: true

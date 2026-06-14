@@ -1,0 +1,37 @@
+# Tightest practical ClusterRole for the identity core-provider uses to deploy a
+# CompositionDefinition (spec.deploy.mode: Remote) into a target cluster.
+#
+# It installs the generated CRD, the composition-dynamic-controller workload
+# (Deployment/Service/ConfigMap/ServiceAccount), the RBAC that controller runs as, and
+# cleans up composition instances on delete.
+#
+# Note the `bind` and `escalate` verbs on rbac.authorization.k8s.io: the Roles/ClusterRoles
+# this identity creates carry permissions derived from each chart, and Kubernetes
+# privilege-escalation prevention requires the granter to hold `bind`+`escalate` to create
+# them. A fully-static least-privilege role is therefore not achievable in general;
+# cluster-admin is the simpler equivalent of this manifest.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: core-provider-remote-target
+rules:
+  # The generated CompositionDefinition CRD.
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  # The composition-dynamic-controller workload.
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["serviceaccounts", "configmaps", "services"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  # RBAC the controller runs as. bind + escalate are required because the granted
+  # permissions are chart-derived and may exceed this identity's own permissions.
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "clusterroles", "rolebindings", "clusterrolebindings"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete", "bind", "escalate"]
+  # Composition instances managed by the CDC, cleaned up on delete.
+  - apiGroups: ["composition.krateo.io"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch", "delete"]

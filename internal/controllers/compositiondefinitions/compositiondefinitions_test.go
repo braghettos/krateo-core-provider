@@ -27,7 +27,6 @@ import (
 	"github.com/krateoplatformops/provider-runtime/pkg/controller"
 	"github.com/krateoplatformops/provider-runtime/pkg/logging"
 	"github.com/krateoplatformops/provider-runtime/pkg/ratelimiter"
-	"github.com/stoewer/go-strcase"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -35,12 +34,9 @@ import (
 
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/server"
-	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	"github.com/krateoplatformops/core-provider/apis"
 	"github.com/krateoplatformops/core-provider/apis/compositiondefinitions/v1alpha1"
-	"github.com/krateoplatformops/core-provider/internal/controllers/certificates"
-	"github.com/krateoplatformops/core-provider/internal/tools/certs"
 	"github.com/krateoplatformops/core-provider/internal/tools/kube/watcher"
 	"github.com/krateoplatformops/plumbing/e2e"
 	xenv "github.com/krateoplatformops/plumbing/env"
@@ -103,15 +99,6 @@ func TestMain(m *testing.M) {
 				return ctx, err
 			}
 			r.WithNamespace(namespace)
-
-			err = os.MkdirAll(filepath.Join(os.TempDir(), "assets", "mutating-webhook-configuration"), os.ModePerm)
-			if err != nil {
-				return ctx, err
-			}
-			err = os.Link(filepath.Join(manifestsPath, "mutating-webhook.yaml"), filepath.Join(os.TempDir(), "assets", "mutating-webhook-configuration", "mutating-webhook.yaml"))
-			if err != nil {
-				return ctx, err
-			}
 
 			err = os.MkdirAll(filepath.Join(os.TempDir(), "assets", "cdc-deployment"), os.ModePerm)
 			if err != nil {
@@ -238,43 +225,12 @@ func TestController(t *testing.T) {
 		log := logging.NewLogrLogger(logrlog)
 
 		pluralizer := NewTestPluralizer(false)
-		webhookServiceName := "core-provider-webhook-service"
-		webhookServiceNamespace := "krateo-system"
 		ctrl.SetLogger(logrlog)
 
-		certOpts := certs.GenerateClientCertAndKeyOpts{
-			Duration:              24 * time.Hour,
-			Username:              fmt.Sprintf("%s.%s.svc", webhookServiceName, webhookServiceNamespace),
-			Approver:              strcase.KebabCase("core-provider"),
-			LeaseExpirationMargin: 16 * time.Hour,
-		}
-
-		certMgr, err := certificates.NewCertManager(certificates.Opts{
-			WebhookServiceName:          webhookServiceName,
-			WebhookServiceNamespace:     webhookServiceNamespace,
-			MutatingWebhookTemplatePath: MutatingWebhookPath,
-			CertOpts:                    certOpts,
-			RestConfig:                  cfg.Client().RESTConfig(),
-		}, certificates.WithPluralizer(pluralizer))
-		if err != nil {
-			log.Info("Cannot create certificate manager", "error", err)
-			os.Exit(1)
-		}
-		err = certMgr.RefreshCertificates()
-		if err != nil {
-			log.Info("Cannot refresh certificates", "error", err)
-			os.Exit(1)
-		}
 		mgr, err := ctrl.NewManager(cfg.Client().RESTConfig(), ctrl.Options{
 			Metrics: server.Options{
 				BindAddress: "0", // disable metrics for tests
 			},
-			WebhookServer: webhook.NewServer(webhook.Options{
-				Port:     9443,
-				CertDir:  CertsPath,
-				CertName: "tls.crt",
-				KeyName:  "tls.key",
-			}),
 		})
 		if err != nil {
 			return ctx, err
@@ -293,10 +249,8 @@ func TestController(t *testing.T) {
 		// }
 
 		if err := Setup(mgr, Options{
-			ControllerOptions:       o,
-			CertManager:             certMgr,
-			Pluralizer:              pluralizer,
-			CertificateSyncInterval: 60 * time.Second, // Short interval for faster testing
+			ControllerOptions: o,
+			Pluralizer:        pluralizer,
 		}); err != nil {
 			log.Info("Cannot setup controllers", "error", err)
 			os.Exit(1)

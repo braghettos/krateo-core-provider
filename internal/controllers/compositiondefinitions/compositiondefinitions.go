@@ -12,14 +12,11 @@ import (
 	"github.com/krateoplatformops/plumbing/kubeutil/eventrecorder"
 
 	compositiondefinitionsv1alpha1 "github.com/krateoplatformops/core-provider/apis/compositiondefinitions/v1alpha1"
-	"github.com/krateoplatformops/core-provider/internal/controllers/certificates"
 	"github.com/krateoplatformops/core-provider/internal/controllers/compositiondefinitions/helpers/getters"
 	"github.com/krateoplatformops/core-provider/internal/controllers/compositiondefinitions/helpers/status"
-	"github.com/krateoplatformops/core-provider/internal/controllers/compositiondefinitions/webhooks/conversion"
-	"github.com/krateoplatformops/core-provider/internal/controllers/compositiondefinitions/webhooks/mutation"
-	webhooktelemetry "github.com/krateoplatformops/core-provider/internal/telemetry/webhooks"
 	"github.com/krateoplatformops/core-provider/internal/tools/chart"
 	"github.com/krateoplatformops/core-provider/internal/tools/chart/chartfs"
+	"github.com/krateoplatformops/core-provider/internal/tools/clusterkube"
 	contexttools "github.com/krateoplatformops/core-provider/internal/tools/context"
 	crdclient "github.com/krateoplatformops/core-provider/internal/tools/crd"
 	crdutils "github.com/krateoplatformops/core-provider/internal/tools/crd/generation"
@@ -37,7 +34,7 @@ import (
 	"github.com/krateoplatformops/provider-runtime/pkg/reconciler"
 	"github.com/krateoplatformops/provider-runtime/pkg/resource"
 
-	"k8s.io/apimachinery/pkg/runtime"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/discovery/cached/memory"
 	"k8s.io/client-go/dynamic"
@@ -45,6 +42,8 @@ import (
 	record "k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 const (
@@ -56,20 +55,15 @@ var (
 	CDCtemplateDeploymentPath       = filepath.Join(os.TempDir(), "assets/cdc-deployment/deployment.yaml")
 	CDCtemplateConfigmapPath        = filepath.Join(os.TempDir(), "assets/cdc-configmap/configmap.yaml")
 	CDCrbacConfigFolder             = filepath.Join(os.TempDir(), "assets/cdc-rbac/")
-	MutatingWebhookPath             = filepath.Join(os.TempDir(), "assets/mutating-webhook-configuration/mutating-webhook.yaml")
 	JSONSchemaTemplateConfigmapPath = filepath.Join(os.TempDir(), "assets/json-schema-configmap/configmap.yaml")
 	ServiceTemplatePath             = filepath.Join(os.TempDir(), "assets/cdc-service/service.yaml")
-	CertsPath                       = filepath.Join(os.TempDir(), "k8s-webhook-server", "serving-certs")
 )
 
 type Options struct {
 	ControllerOptions controller.Options
 	// Metrics records reconcile telemetry for the CompositionDefinition controller.
-	Metrics                 reconciler.MetricsRecorder
-	WebhookMetrics          *webhooktelemetry.Metrics
-	CertManager             certificates.CertManagerInterface
-	Pluralizer              pluralizerlib.PluralizerInterface
-	CertificateSyncInterval time.Duration
+	Metrics    reconciler.MetricsRecorder
+	Pluralizer pluralizerlib.PluralizerInterface
 }
 
 func Setup(mgr ctrl.Manager, o Options) error {
@@ -88,7 +82,6 @@ func Setup(mgr ctrl.Manager, o Options) error {
 	}
 
 	cli := mgr.GetClient()
-	apiReader := mgr.GetAPIReader()
 
 	// Cleanup: Remove obsolete label for backward compatibility on startup
 	// This handles CompositionDefinitions created before the removal of the still-exist-compositions-finalizer
@@ -98,20 +91,20 @@ func Setup(mgr ctrl.Manager, o Options) error {
 		l.Debug("Failed to cleanup obsolete finalizer labels on startup", "error", err)
 	}
 
-	compositionConversionWebhook := conversion.NewWebhookHandler(runtime.NewScheme(), o.WebhookMetrics)
-	mgr.GetWebhookServer().Register("/mutate", mutation.NewWebhookHandler(apiReader, o.WebhookMetrics))
-	mgr.GetWebhookServer().Register("/convert", compositionConversionWebhook)
+	// core-provider hosts no admission webhooks: generated CRDs use None conversion, and
+	// the composition-version label is stamped by a MutatingAdmissionPolicy shipped
+	// declaratively by the chart (it must exist in every cluster a composition CRD lives
+	// in, including remote targets; requires Kubernetes >= 1.36).
 
 	r := reconciler.NewReconciler(mgr,
 		resource.ManagedKind(compositiondefinitionsv1alpha1.CompositionDefinitionGroupVersionKind),
 		reconciler.WithExternalConnecter(&connector{
-			client:      kubernetes.NewForConfigOrDie(mgr.GetConfig()),
-			dynamic:     dynamic.NewForConfigOrDie(mgr.GetConfig()),
-			kube:        cli,
-			log:         l,
-			recorder:    recorder,
-			pluralizer:  o.Pluralizer,
-			certManager: o.CertManager,
+			client:     kubernetes.NewForConfigOrDie(mgr.GetConfig()),
+			dynamic:    dynamic.NewForConfigOrDie(mgr.GetConfig()),
+			kube:       cli,
+			log:        l,
+			recorder:   recorder,
+			pluralizer: o.Pluralizer,
 		}),
 		reconciler.WithTimeout(reconcileTimeout),
 		reconciler.WithPollInterval(o.ControllerOptions.PollInterval),
@@ -121,31 +114,103 @@ func Setup(mgr ctrl.Manager, o Options) error {
 		reconciler.WithThrottledRecorder(event.NewAPIRecorder(throttledRecorder)),
 	)
 
-	// Perform an eager CA bundle propagation before the manager starts.
-	// This keeps webhook configuration in sync during startup and avoids
-	// a readiness window where admission can hit stale or missing CA data.
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-	if err := o.CertManager.UpdateExistingResources(ctx); err != nil {
-		return fmt.Errorf("error updating existing resources with CA bundle during setup: %w", err)
-	}
-
-	// Setup certificate reconciler as a separate runnable
-	certReconciler := certificates.NewCertificateReconciler(
-		o.CertManager,
-		o.Pluralizer,
-		l,
-		o.CertificateSyncInterval,
-	)
-	if err := mgr.Add(certReconciler); err != nil {
-		return fmt.Errorf("error adding certificate reconciler to manager: %w", err)
-	}
-
 	return ctrl.NewControllerManagedBy(mgr).
 		Named(name).
 		WithOptions(o.ControllerOptions.ForControllerRuntime()).
 		For(&compositiondefinitionsv1alpha1.CompositionDefinition{}).
+		// Re-reconcile a CompositionDefinition when a Secret it references changes (its
+		// chart credentials, or a kubeconfig Secret behind its KubernetesTarget), so
+		// credentials rotated out-of-band (e.g. by External Secrets Operator) are picked
+		// up promptly instead of waiting for the next poll.
+		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(enqueueForReferencedSecret(cli))).
+		// Re-reconcile CompositionDefinitions when the KubernetesTarget they reference
+		// changes (e.g. its kubeconfigRef is repointed).
+		Watches(&compositiondefinitionsv1alpha1.KubernetesTarget{}, handler.EnqueueRequestsFromMapFunc(enqueueForKubernetesTarget(cli))).
 		Complete(ratelimiter.New(name, r, o.ControllerOptions.GlobalRateLimiter))
+}
+
+// enqueueForReferencedSecret maps a Secret event to reconcile requests for every
+// CompositionDefinition that references it - directly as chart credentials, or
+// transitively via a KubernetesTarget whose kubeconfigRef points at the Secret.
+func enqueueForReferencedSecret(cli client.Client) handler.MapFunc {
+	return func(ctx context.Context, obj client.Object) []reconcile.Request {
+		secret, ok := obj.(*corev1.Secret)
+		if !ok {
+			return nil
+		}
+
+		// Names of KubernetesTargets whose kubeconfig lives in this Secret.
+		targetNames := map[string]bool{}
+		var targets compositiondefinitionsv1alpha1.KubernetesTargetList
+		if err := cli.List(ctx, &targets); err == nil {
+			for i := range targets.Items {
+				ref := targets.Items[i].Spec.KubeconfigRef
+				if ref.Namespace == secret.Namespace && ref.Name == secret.Name {
+					targetNames[targets.Items[i].Name] = true
+				}
+			}
+		}
+
+		var list compositiondefinitionsv1alpha1.CompositionDefinitionList
+		if err := cli.List(ctx, &list); err != nil {
+			return nil
+		}
+
+		var reqs []reconcile.Request
+		for i := range list.Items {
+			cd := &list.Items[i]
+			if compositionReferencesChartSecret(cd, secret.Namespace, secret.Name) ||
+				compositionReferencesTargetIn(cd, targetNames) {
+				reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(cd)})
+			}
+		}
+		return reqs
+	}
+}
+
+// enqueueForKubernetesTarget maps a KubernetesTarget event to reconcile requests for
+// every CompositionDefinition referencing it.
+func enqueueForKubernetesTarget(cli client.Client) handler.MapFunc {
+	return func(ctx context.Context, obj client.Object) []reconcile.Request {
+		kt, ok := obj.(*compositiondefinitionsv1alpha1.KubernetesTarget)
+		if !ok {
+			return nil
+		}
+
+		var list compositiondefinitionsv1alpha1.CompositionDefinitionList
+		if err := cli.List(ctx, &list); err != nil {
+			return nil
+		}
+
+		var reqs []reconcile.Request
+		for i := range list.Items {
+			cd := &list.Items[i]
+			if compositionReferencesTargetIn(cd, map[string]bool{kt.Name: true}) {
+				reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(cd)})
+			}
+		}
+		return reqs
+	}
+}
+
+// compositionReferencesChartSecret reports whether cd uses the Secret ns/name as its
+// chart repository credentials.
+func compositionReferencesChartSecret(cd *compositiondefinitionsv1alpha1.CompositionDefinition, ns, name string) bool {
+	c := cd.Spec.Chart
+	if c == nil || c.Credentials == nil {
+		return false
+	}
+	return c.Credentials.PasswordRef.Namespace == ns && c.Credentials.PasswordRef.Name == name
+}
+
+// compositionReferencesTargetIn reports whether cd's deploy.targetRef names one of the
+// given KubernetesTargets.
+func compositionReferencesTargetIn(cd *compositiondefinitionsv1alpha1.CompositionDefinition, targetNames map[string]bool) bool {
+	d := cd.Spec.Deploy
+	if d == nil || d.TargetRef == nil {
+		return false
+	}
+	return targetNames[d.TargetRef.Name]
 }
 
 // cleanupObsoleteFinalizerLabels removes the obsolete "composition.krateo.io/still-exist-compositions-finalizer" label
@@ -186,13 +251,12 @@ func cleanupObsoleteFinalizerLabels(ctx context.Context, kube client.Client, log
 }
 
 type connector struct {
-	dynamic     dynamic.Interface
-	client      kubernetes.Interface
-	kube        client.Client
-	log         logging.Logger
-	recorder    record.EventRecorder
-	pluralizer  pluralizerlib.PluralizerInterface
-	certManager certificates.CertManagerInterface
+	dynamic    dynamic.Interface
+	client     kubernetes.Interface
+	kube       client.Client
+	log        logging.Logger
+	recorder   record.EventRecorder
+	pluralizer pluralizerlib.PluralizerInterface
 }
 
 func (c *connector) Connect(ctx context.Context, mg resource.Managed) (reconciler.ExternalClient, error) {
@@ -203,25 +267,75 @@ func (c *connector) Connect(ctx context.Context, mg resource.Managed) (reconcile
 
 	log := c.log.WithValues("name", cr.Name, "namespace", cr.Namespace)
 
-	return &external{
-		kube:        c.kube,
-		log:         log,
-		dynamic:     c.dynamic,
-		client:      c.client,
-		rec:         c.recorder,
-		pluralizer:  c.pluralizer,
-		certManager: c.certManager,
-	}, nil
+	ext := &external{
+		mgmt:       c.kube,
+		kube:       c.kube,
+		dynamic:    c.dynamic,
+		client:     c.client,
+		log:        log,
+		rec:        c.recorder,
+		pluralizer: c.pluralizer,
+	}
+
+	// When the CompositionDefinition targets a remote cluster, the generated CRD, its
+	// RBAC and the composition-dynamic-controller are deployed there. The
+	// CompositionDefinition resource and its referenced secrets stay in the management
+	// cluster, so mgmt keeps pointing at the local cluster.
+	if clusterkube.IsRemote(cr.Spec.Deploy) {
+		tc, err := clusterkube.Remote(ctx, c.kube, cr.Spec.Deploy)
+		if err != nil {
+			return nil, err
+		}
+		ext.kube = tc.Kube
+		ext.dynamic = tc.Dynamic
+		ext.client = tc.Clientset
+		ext.remote = true
+		ext.secretResourceVersion = tc.SecretResourceVersion
+		log.Debug("Deploying to remote target cluster", "host", tc.Config.Host)
+	}
+
+	return ext, nil
 }
 
 type external struct {
-	dynamic     dynamic.Interface
-	kube        client.Client
-	client      kubernetes.Interface
-	log         logging.Logger
-	rec         record.EventRecorder
-	pluralizer  pluralizerlib.PluralizerInterface
-	certManager certificates.CertManagerInterface
+	// mgmt is the management-cluster client: it holds the CompositionDefinition
+	// resource, the chart/credentials secrets, and is where status is persisted.
+	mgmt client.Client
+	// kube, dynamic and client target the cluster where the generated CRD, RBAC and the
+	// composition-dynamic-controller are deployed (local == mgmt, or a remote target).
+	dynamic    dynamic.Interface
+	kube       client.Client
+	client     kubernetes.Interface
+	log        logging.Logger
+	rec        record.EventRecorder
+	pluralizer pluralizerlib.PluralizerInterface
+
+	// remote is true when the target is a remote cluster; secretResourceVersion is the
+	// resourceVersion of the kubeconfig Secret used to reach it.
+	remote                bool
+	secretResourceVersion string
+}
+
+// setTargetStatus records where the controller is deployed and whether that cluster is
+// reachable, by probing the target cluster's discovery endpoint.
+func (e *external) setTargetStatus(cr *compositiondefinitionsv1alpha1.CompositionDefinition) {
+	mode := compositiondefinitionsv1alpha1.DeploymentModeLocal
+	if clusterkube.IsRemote(cr.Spec.Deploy) {
+		mode = compositiondefinitionsv1alpha1.DeploymentModeRemote
+	}
+
+	ts := &compositiondefinitionsv1alpha1.TargetStatus{Mode: string(mode)}
+	if v, err := e.client.Discovery().ServerVersion(); err == nil {
+		ts.ConnectionStatus = "Healthy"
+		ts.Version = v.GitVersion
+	} else {
+		ts.ConnectionStatus = "Down"
+	}
+	if e.remote {
+		ts.KubeconfigSecretResourceVersion = e.secretResourceVersion
+	}
+
+	cr.Status.Target = ts
 }
 
 func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler.ExternalObservation, error) {
@@ -235,12 +349,15 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 
 	log.Info("Observing CompositionDefinition")
 
-	pkgInfo, dir, err := chart.ChartInfoFromSpec(ctx, e.kube, cr.Spec.Chart)
+	// Record where the controller is deployed and whether that cluster is reachable.
+	e.setTargetStatus(cr)
+
+	pkgInfo, dir, err := chart.ChartInfoFromSpec(ctx, e.mgmt, cr.Spec.Chart)
 	if err != nil {
 		return reconciler.ExternalObservation{}, fmt.Errorf("error getting chart info: %w", err)
 	}
 
-	pkg, err := chartfs.ForSpec(ctx, e.kube, cr.Spec.Chart)
+	pkg, err := chartfs.ForSpec(ctx, e.mgmt, cr.Spec.Chart)
 	if err != nil {
 		return reconciler.ExternalObservation{}, err
 	}
@@ -402,7 +519,7 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) error {
 
 	log.Info("Creating CompositionDefinition")
 
-	pkg, dir, err := chart.ChartInfoFromSpec(ctx, e.kube, cr.Spec.Chart)
+	pkg, dir, err := chart.ChartInfoFromSpec(ctx, e.mgmt, cr.Spec.Chart)
 	if err != nil {
 		return err
 	}
@@ -424,16 +541,9 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) error {
 		return fmt.Errorf("error generating CRD: crd is nil")
 	}
 
-	gvr, err := crdclient.ApplyOrUpdateCRD(ctx, e.kube, e.dynamic, crd, crdclient.ApplyOpts{
-		CABundle:                e.certManager.GetCABundle(),
-		WebhookServiceNamespace: e.certManager.GetServiceNamespace(),
-		WebhookServiceName:      e.certManager.GetServiceName(),
-	})
+	gvr, err := crdclient.ApplyOrUpdateCRD(ctx, e.kube, e.dynamic, crd)
 	if err != nil {
 		return fmt.Errorf("error applying or updating CRD: %w", err)
-	}
-	if err := e.certManager.ManageCertificates(ctx, gvr); err != nil {
-		return fmt.Errorf("error managing certificates after CRD apply: %w", err)
 	}
 
 	opts := deploy.DeployOptions{
@@ -477,11 +587,11 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 
 	log.Info("Updating CompositionDefinition")
 
-	pkg, dir, err := chart.ChartInfoFromSpec(ctx, e.kube, cr.Spec.Chart)
+	pkg, dir, err := chart.ChartInfoFromSpec(ctx, e.mgmt, cr.Spec.Chart)
 	if err != nil {
 		return fmt.Errorf("error getting chart info: %w", err)
 	}
-	pkgFS, err := chartfs.ForSpec(ctx, e.kube, cr.Spec.Chart)
+	pkgFS, err := chartfs.ForSpec(ctx, e.mgmt, cr.Spec.Chart)
 	if err != nil {
 		return err
 	}
@@ -503,16 +613,9 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 		return fmt.Errorf("error generating CRD: crd is nil")
 	}
 
-	gvr, err := crdclient.ApplyOrUpdateCRD(ctx, e.kube, e.dynamic, crd, crdclient.ApplyOpts{
-		CABundle:                e.certManager.GetCABundle(),
-		WebhookServiceNamespace: e.certManager.GetServiceNamespace(),
-		WebhookServiceName:      e.certManager.GetServiceName(),
-	})
+	gvr, err := crdclient.ApplyOrUpdateCRD(ctx, e.kube, e.dynamic, crd)
 	if err != nil {
 		return fmt.Errorf("error applying or updating CRD: %w", err)
-	}
-	if err := e.certManager.ManageCertificates(ctx, gvr); err != nil {
-		return fmt.Errorf("error managing certificates after CRD update: %w", err)
 	}
 
 	opts := deploy.DeployOptions{
@@ -594,7 +697,7 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
 
 	cr.SetConditions(rtv1.Deleting())
 
-	pkg, dir, err := chart.ChartInfoFromSpec(ctx, e.kube, cr.Spec.Chart)
+	pkg, dir, err := chart.ChartInfoFromSpec(ctx, e.mgmt, cr.Spec.Chart)
 	if err != nil {
 		return fmt.Errorf("error getting chart info: %w", err)
 	}
@@ -615,7 +718,7 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
 		return fmt.Errorf("error converting GVK to GVR: %w - GVK: %s", err, gvk.String())
 	}
 	if crdExist {
-		lst, err := getters.GetCompositionDefinitionsWithVersion(ctx, e.kube, schema.GroupVersionKind{
+		lst, err := getters.GetCompositionDefinitionsWithVersion(ctx, e.mgmt, schema.GroupVersionKind{
 			Group:   gvk.Group,
 			Kind:    gvk.Kind,
 			Version: gvk.Version,
@@ -650,7 +753,7 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
 		}
 
 		var skipCRD bool
-		lst, err = getters.GetCompositionDefinitions(ctx, e.kube, schema.GroupKind{
+		lst, err = getters.GetCompositionDefinitions(ctx, e.mgmt, schema.GroupKind{
 			Group: gvk.Group,
 			Kind:  gvk.Kind,
 		})
