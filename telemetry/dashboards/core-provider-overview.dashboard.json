@@ -79,66 +79,12 @@
       "options": { "displayMode": "lcd", "orientation": "horizontal" }
     },
     {
-      "id": 300,
-      "type": "timeseries",
-      "title": "Mutating Webhook Avg Latency",
-      "description": "Average duration computed from core_provider_webhook_request_duration_seconds sum/count, filtered to webhook=mutating.",
-      "datasource": "$datasource",
-      "interval": "5m",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 5 },
-      "targets": [
-        { "refId": "A", "expr": "sum by (operation) (rate(core_provider_webhook_request_duration_seconds_sum{webhook=\"mutating\"}[15m])) / sum by (operation) (rate(core_provider_webhook_request_duration_seconds_count{webhook=\"mutating\"}[15m]))", "legendFormat": "{{operation}}" }
-      ],
-      "fieldConfig": {
-        "defaults": { "unit": "s", "custom": { "drawStyle": "steps", "fillOpacity": 10 }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 0.2 }] } }
-      }
-    },
-    {
-      "id": 301,
-      "type": "timeseries",
-      "title": "Mutating Webhook Traffic & Errors",
-      "description": "Request rate from core_provider_webhook_request_total, filtered to webhook=mutating and grouped by operation and outcome.",
-      "datasource": "$datasource",
-      "interval": "5m",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 5 },
-      "targets": [
-        { "refId": "A", "expr": "sum by (operation, outcome) (rate(core_provider_webhook_request_total{webhook=\"mutating\"}[15m]))", "legendFormat": "{{operation}} / {{outcome}}" }
-      ],
-      "fieldConfig": { "defaults": { "unit": "ops/s" } }
-    },
-    {
-      "id": 302,
-      "type": "timeseries",
-      "title": "Conversion Webhook Avg Latency",
-      "description": "Average duration computed from core_provider_webhook_request_duration_seconds sum/count, filtered to webhook=conversion.",
-      "datasource": "$datasource",
-      "interval": "5m",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 13 },
-      "targets": [
-        { "refId": "A", "expr": "sum(rate(core_provider_webhook_request_duration_seconds_sum{webhook=\"conversion\"}[15m])) / sum(rate(core_provider_webhook_request_duration_seconds_count{webhook=\"conversion\"}[15m]))", "legendFormat": "conversion" }
-      ],
-      "fieldConfig": { "defaults": { "unit": "s", "custom": { "drawStyle": "steps", "fillOpacity": 10 }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 0.2 }] } } }
-    },
-    {
-      "id": 303,
-      "type": "timeseries",
-      "title": "Conversion Webhook Traffic & Errors",
-      "description": "Request rate from core_provider_webhook_request_total, filtered to webhook=conversion and grouped by outcome.",
-      "datasource": "$datasource",
-      "interval": "5m",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 13 },
-      "targets": [
-        { "refId": "A", "expr": "sum by (outcome) (rate(core_provider_webhook_request_total{webhook=\"conversion\"}[15m]))", "legendFormat": "{{outcome}}" }
-      ],
-      "fieldConfig": { "defaults": { "unit": "ops/s" } }
-    },
-    {
       "id": 200,
       "type": "timeseries",
       "title": "External Avg Latency",
       "datasource": "$datasource",
       "interval": "5m",
-      "gridPos": { "h": 8, "w": 16, "x": 0, "y": 21 },
+      "gridPos": { "h": 8, "w": 16, "x": 0, "y": 5 },
       "targets": [
         { "refId": "A", "expr": "sum(rate(provider_runtime_external_connect_duration_seconds_sum[15m])) / sum(rate(provider_runtime_external_connect_duration_seconds_count[15m]))", "legendFormat": "Connect" },
         { "refId": "B", "expr": "sum(rate(provider_runtime_external_observe_duration_seconds_sum[15m])) / sum(rate(provider_runtime_external_observe_duration_seconds_count[15m]))", "legendFormat": "Observe" },
@@ -154,7 +100,7 @@
       "title": "Ext. Failures (15m)",
       "datasource": "$datasource",
       "interval": "5m",
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 21 },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 5 },
       "targets": [
         { "refId": "A", "expr": "(sum(increase(provider_runtime_external_connect_failure_total[15m])) or vector(0)) + (sum(increase(provider_runtime_external_observe_failure_total[15m])) or vector(0)) + (sum(increase(provider_runtime_external_create_failure_total[15m])) or vector(0)) + (sum(increase(provider_runtime_external_update_failure_total[15m])) or vector(0)) + (sum(increase(provider_runtime_external_delete_failure_total[15m])) or vector(0))", "legendFormat": "Total Failures" }
       ],
