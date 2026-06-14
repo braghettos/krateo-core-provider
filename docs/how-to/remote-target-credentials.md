@@ -152,10 +152,23 @@ spec:
 > provider's IRSA/Workload-Identity flow), publishing the token to your secret store.
 > core-provider only consumes the resulting kubeconfig.
 
-## Conversion webhook note (multi-version CRDs)
+## Target prerequisite: the composition-version policy
 
-For multi-version Compositions deployed to a remote target, also set
-`CORE_PROVIDER_WEBHOOK_URL` to core-provider's externally reachable `/convert` endpoint
-(its TLS cert must match the served webhook cert). Without it, remote CRDs are installed
-with `NoneConverter` (no cross-version conversion). See
+core-provider hosts no admission webhooks. Generated CRDs use `None` conversion, and the
+`krateo.io/composition-version` label (which core-provider relies on for per-version
+listing and migration) is stamped by a cluster-wide **`MutatingAdmissionPolicy`** —
+in-apiserver CEL, no webhook server or cert.
+
+Because composition **instances are created in the target cluster**, that policy must
+exist **in the target**, not just the management cluster. core-provider does not install
+it (it's declarative); install the `target-chart` from the core-provider chart repo into
+**every cluster referenced by a `KubernetesTarget`**, as part of target onboarding:
+
+```bash
+helm install krateo-core-provider-target oci://<registry>/krateo-core-provider-target \
+  --kube-context <target-cluster>
+```
+
+**Requirement:** the GA `MutatingAdmissionPolicy` API (`admissionregistration.k8s.io/v1`)
+needs **Kubernetes ≥ 1.36** on the management cluster **and every target**. See
 [`../design/multicluster-compositions.md`](../design/multicluster-compositions.md).
