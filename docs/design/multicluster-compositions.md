@@ -30,9 +30,26 @@
 > **`vacuum` storage version** still provides lossless storage across heterogeneous
 > per-version schemas (orthogonal to conversion). Verified on kind: a `None` + vacuum CRD
 > with heterogeneous v1/v2 schemas establishes, and an object created under v1 round-trips
-> losslessly through storage. `certManager` still runs for the `/mutate` webhook;
-> `UpdateCABundle` skips when a CRD has no conversion webhook. (Removing the now-dead
-> `/convert` endpoint + `webhooks/conversion` package is a follow-up cleanup.)
+> losslessly through storage.
+>
+> **Mutating webhook → `MutatingAdmissionPolicy` (decided 2026-06-14; planned).** The
+> `/mutate` webhook only stamps `metadata.labels["krateo.io/composition-version"]` =
+> the request's served version (consumed by `getters.go` for per-version listing/migration;
+> needed because the vacuum storage version erases the apiVersion). This is replaceable by
+> a single cluster-wide **`MutatingAdmissionPolicy`** (CEL, in-apiserver — no webhook
+> server, cert, or `MutatingWebhookConfiguration`) matching `apiGroups:[composition.krateo.io],
+> resources:[*]`. Prototyped on kind 1.34: stamps the label from `request.requestKind.version`
+> with zero webhook configs, `spec` untouched, label-selection works. **Hard requirement:
+> Kubernetes ≥ 1.36** (the GA `v1` API, on by default) on the management cluster **and all
+> remote targets** — accepted by Diego. (1.34/1.35 beta needs `--runtime-config`, unsettable
+> on managed targets, so 1.36 is the floor.)
+>
+> **Cascading payoff:** with both `/convert` (None) and `/mutate` (policy) gone, core-provider
+> has **no admission webhooks at all** → the webhook server, serving cert, the whole
+> `certManager` + cert-reconciler, and the `MutatingWebhookConfiguration` template become
+> removable. For remote targets, core-provider applies the policy into the target instead of
+> projecting a webhook. (Follow-up PR; also removes the now-dead `/convert` +
+> `webhooks/conversion`.)
 >
 > **e2e-validated (2026-06-13):** the remote-targeting path was exercised against real
 > clusters — a kind management cluster + a disposable single-node GKE target, with a
