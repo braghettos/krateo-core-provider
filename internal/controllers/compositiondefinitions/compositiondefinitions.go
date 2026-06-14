@@ -14,7 +14,6 @@ import (
 	compositiondefinitionsv1alpha1 "github.com/krateoplatformops/core-provider/apis/compositiondefinitions/v1alpha1"
 	"github.com/krateoplatformops/core-provider/internal/controllers/compositiondefinitions/helpers/getters"
 	"github.com/krateoplatformops/core-provider/internal/controllers/compositiondefinitions/helpers/status"
-	"github.com/krateoplatformops/core-provider/internal/tools/admissionpolicy"
 	"github.com/krateoplatformops/core-provider/internal/tools/chart"
 	"github.com/krateoplatformops/core-provider/internal/tools/chart/chartfs"
 	"github.com/krateoplatformops/core-provider/internal/tools/clusterkube"
@@ -93,8 +92,9 @@ func Setup(mgr ctrl.Manager, o Options) error {
 	}
 
 	// core-provider hosts no admission webhooks: generated CRDs use None conversion, and
-	// the composition-version label is stamped by a MutatingAdmissionPolicy (see
-	// internal/tools/admissionpolicy), provisioned per target in the reconcile path.
+	// the composition-version label is stamped by a MutatingAdmissionPolicy shipped
+	// declaratively by the chart (it must exist in every cluster a composition CRD lives
+	// in, including remote targets; requires Kubernetes >= 1.36).
 
 	r := reconciler.NewReconciler(mgr,
 		resource.ManagedKind(compositiondefinitionsv1alpha1.CompositionDefinitionGroupVersionKind),
@@ -545,11 +545,6 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) error {
 	if err != nil {
 		return fmt.Errorf("error applying or updating CRD: %w", err)
 	}
-	// Ensure the MutatingAdmissionPolicy that stamps the composition-version label exists
-	// in the cluster the CRD lives in (the management cluster or a remote target).
-	if err := admissionpolicy.Ensure(ctx, e.kube); err != nil {
-		return fmt.Errorf("error ensuring composition-version policy: %w", err)
-	}
 
 	opts := deploy.DeployOptions{
 		RBACFolderPath:         CDCrbacConfigFolder,
@@ -621,10 +616,6 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 	gvr, err := crdclient.ApplyOrUpdateCRD(ctx, e.kube, e.dynamic, crd)
 	if err != nil {
 		return fmt.Errorf("error applying or updating CRD: %w", err)
-	}
-	// See Create: ensure the composition-version MutatingAdmissionPolicy exists.
-	if err := admissionpolicy.Ensure(ctx, e.kube); err != nil {
-		return fmt.Errorf("error ensuring composition-version policy: %w", err)
 	}
 
 	opts := deploy.DeployOptions{
