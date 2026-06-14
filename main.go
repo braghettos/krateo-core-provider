@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -12,10 +11,7 @@ import (
 
 	"github.com/go-logr/logr"
 
-	"github.com/krateoplatformops/core-provider/internal/controllers/certificates"
 	"github.com/krateoplatformops/core-provider/internal/controllers/compositiondefinitions"
-	webhooktelemetry "github.com/krateoplatformops/core-provider/internal/telemetry/webhooks"
-	"github.com/krateoplatformops/core-provider/internal/tools/certs"
 	"github.com/krateoplatformops/core-provider/internal/tools/loghandler"
 	"github.com/krateoplatformops/core-provider/internal/tools/pluralizer"
 	"github.com/krateoplatformops/plumbing/env"
@@ -24,7 +20,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/config"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
-	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	"github.com/krateoplatformops/core-provider/apis"
 	"github.com/krateoplatformops/provider-runtime/pkg/controller"
@@ -53,15 +48,6 @@ func main() {
 	metricsExportInterval := flag.Duration("otel-export-interval", env.Duration("OTEL_EXPORT_INTERVAL", defaultOtelExportInterval), "The interval used to export OTLP metrics.")
 	maxErrorRetryInterval := flag.Duration("max-error-retry-interval", env.Duration(fmt.Sprintf("%s_MAX_ERROR_RETRY_INTERVAL", envVarPrefix), 1*time.Minute), "The maximum interval between retries when an error occurs. This should be less than the half of the poll interval.")
 	minErrorRetryInterval := flag.Duration("min-error-retry-interval", env.Duration(fmt.Sprintf("%s_MIN_ERROR_RETRY_INTERVAL", envVarPrefix), 1*time.Second), "The minimum interval between retries when an error occurs. This should be less than max-error-retry-interval.")
-	webhookServiceName := flag.String("webhook-service-name", env.String(fmt.Sprintf("%s_WEBHOOK_SERVICE_NAME", envVarPrefix), "core-provider-webhook-service"), "The name of the webhook service.")
-	webhookServiceNamespace := flag.String("webhook-service-namespace", env.String(fmt.Sprintf("%s_WEBHOOK_SERVICE_NAMESPACE", envVarPrefix), "krateo-system"), "The namespace of the webhook service.")
-	tlsCertificateDuration := flag.Duration("tls-certificate-duration", env.Duration(fmt.Sprintf("%s_TLS_CERTIFICATE_DURATION", envVarPrefix), 24*time.Hour), "The duration of the TLS certificate. It should be at least 10 minutes and a minimum of 3 times the poll interval.")
-	tlsCertificateLeaseExpirationMargin := flag.Duration(
-		"tls-certificate-lease-expiration-margin",
-		env.Duration(fmt.Sprintf("%s_TLS_CERTIFICATE_LEASE_EXPIRATION_MARGIN", envVarPrefix),
-			16*time.Hour),
-		"The duration of the TLS certificate lease expiration margin. It represents the time before the certificate expires when the lease should be renewed. It must be less than the TLS certificate duration. Consider values of 2/3 or less of the TLS certificate duration.")
-	certificateSyncInterval := flag.Duration("certificate-sync-interval", env.Duration(fmt.Sprintf("%s_CERTIFICATE_SYNC_INTERVAL", envVarPrefix), 5*time.Minute), "The interval at which the certificate reconciler syncs certificates and updates resources.")
 
 	flag.Parse()
 
@@ -80,19 +66,6 @@ func main() {
 	// Set the logger for controller-runtime. This only has to log in INFO level as all debug logs are handled by our logger above.
 	ctrl.SetLogger(logr.FromSlogHandler(loghandler.NewJSONHandler(slog.LevelInfo, os.Stderr)))
 
-	if *tlsCertificateDuration < time.Minute*10 {
-		log.Error(errors.New("invalid TLS certificate configuration"), "The TLS certificate duration must be at least 10 minutes.")
-		os.Exit(1)
-	}
-	if *tlsCertificateDuration < time.Duration(3)*(*pollInterval) {
-		log.Error(errors.New("invalid TLS certificate configuration"), "The TLS certificate duration must be at least 3 times the poll interval.")
-		os.Exit(1)
-	}
-	if *tlsCertificateLeaseExpirationMargin > *tlsCertificateDuration {
-		log.Error(errors.New("invalid TLS certificate configuration"), "The TLS certificate lease expiration margin must be less than the TLS certificate duration.")
-		os.Exit(1)
-	}
-
 	log.Debug("Starting",
 		"sync-period", syncPeriod.String(),
 		"poll-interval", pollInterval.String(),
@@ -100,11 +73,6 @@ func main() {
 		"leader-election", *leaderElection,
 		"max-error-retry-interval", maxErrorRetryInterval.String(),
 		"min-error-retry-interval", minErrorRetryInterval.String(),
-		"webhook-service-name", *webhookServiceName,
-		"webhook-service-namespace", *webhookServiceNamespace,
-		"tls-certificate-duration", tlsCertificateDuration.String(),
-		"tls-certificate-lease-expiration-margin", tlsCertificateLeaseExpirationMargin.String(),
-		"certificate-sync-interval", certificateSyncInterval.String(),
 		"otel-enabled", *metricsEnabled,
 		"otel-service-name", *metricsServiceName,
 		"otel-export-interval", metricsExportInterval.String())
@@ -121,11 +89,6 @@ func main() {
 		log.Error(err, "Cannot initialize OpenTelemetry metrics")
 		os.Exit(1)
 	}
-	webhookMetrics, err := webhooktelemetry.NewMetrics()
-	if err != nil {
-		log.Error(err, "Cannot initialize webhook metrics")
-		os.Exit(1)
-	}
 	defer func() {
 		if err := telemetryShutdown(context.Background()); err != nil {
 			log.Error(err, "Cannot shutdown OpenTelemetry metrics")
@@ -138,30 +101,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	certOpts := certs.GenerateClientCertAndKeyOpts{
-		Duration:              *tlsCertificateDuration,
-		Username:              fmt.Sprintf("%s.%s.svc", *webhookServiceName, *webhookServiceNamespace),
-		Approver:              strcase.KebabCase(envVarPrefix),
-		LeaseExpirationMargin: *tlsCertificateLeaseExpirationMargin,
-	}
-	certMgr, err := certificates.NewCertManager(certificates.Opts{
-		WebhookServiceName:          *webhookServiceName,
-		WebhookServiceNamespace:     *webhookServiceNamespace,
-		MutatingWebhookTemplatePath: compositiondefinitions.MutatingWebhookPath,
-		CertOpts:                    certOpts,
-		RestConfig:                  cfg,
-	})
-	if err != nil {
-		log.Error(err, "Cannot create certificate manager")
-		os.Exit(1)
-	}
-
-	err = certMgr.RefreshCertificates()
-	if err != nil {
-		log.Error(err, "Certificate details", "commonName", certOpts.Username, "duration", certOpts.Duration.String(), "leaseExpirationMargin", certOpts.LeaseExpirationMargin.String())
-		os.Exit(1)
-	}
-
+	// core-provider hosts no admission webhooks (None conversion + an in-apiserver
+	// MutatingAdmissionPolicy), so there is no webhook server or serving certificate.
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		LeaderElection:   *leaderElection,
 		LeaderElectionID: fmt.Sprintf("leader-election-%s-provider", strcase.KebabCase(providerName)),
@@ -171,12 +112,6 @@ func main() {
 		Metrics: metricsserver.Options{
 			BindAddress: ":8080",
 		},
-		WebhookServer: webhook.NewServer(webhook.Options{
-			Port:     9443,
-			CertDir:  compositiondefinitions.CertsPath,
-			CertName: "tls.crt",
-			KeyName:  "tls.key",
-		}),
 		Controller: config.Controller{
 			UsePriorityQueue: ptr.To(true),
 		},
@@ -200,12 +135,9 @@ func main() {
 		os.Exit(1)
 	}
 	if err := compositiondefinitions.Setup(mgr, compositiondefinitions.Options{
-		ControllerOptions:       o,
-		Metrics:                 telemetryMetrics,
-		WebhookMetrics:          webhookMetrics,
-		CertManager:             certMgr,
-		Pluralizer:              pluralizer.New(false),
-		CertificateSyncInterval: *certificateSyncInterval,
+		ControllerOptions: o,
+		Metrics:           telemetryMetrics,
+		Pluralizer:        pluralizer.New(false),
 	}); err != nil {
 		log.Error(err, "Cannot setup controllers")
 		os.Exit(1)
