@@ -77,3 +77,20 @@ jobs:
         uses: codecov/codecov-action@v6
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
+
+  crds-drift:
+    name: CRD drift guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 'stable'
+      - name: Regenerate CRDs
+        run: go generate ./...
+      - name: Fail if committed CRDs are out of date
+        run: |
+          # The release-tag crds job publishes ./crds to the chart repo's crds-subchart.
+          # Committed CRDs must match a fresh controller-gen run, or the chart would drift.
+          git diff --exit-code crds/ \
+            || { echo "::error::./crds is out of date. Run 'go generate ./...' and commit the result."; exit 1; }
