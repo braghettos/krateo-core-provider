@@ -14,8 +14,6 @@ import (
 	"time"
 
 	compositiondefinitionsv1alpha1 "github.com/krateoplatformops/core-provider/apis/compositiondefinitions/v1alpha1"
-	crdclient "github.com/krateoplatformops/core-provider/internal/tools/crd"
-	crdutils "github.com/krateoplatformops/core-provider/internal/tools/crd/generation"
 
 	"github.com/krateoplatformops/core-provider/internal/tools/pluralizer"
 	"github.com/krateoplatformops/core-provider/internal/tools/retry"
@@ -354,37 +352,13 @@ func validateCABundleFormat(cabundle []byte) error {
 	return nil
 }
 
+// propagateCABundle updates the CA bundle on the /mutate MutatingWebhookConfiguration.
+// gvr is retained for caller logging context. Generated CRDs use the None conversion
+// strategy (no webhook), so there is no CRD conversion CA bundle to propagate.
 func (m *CertManager) propagateCABundle(ctx context.Context, cabundle []byte, gvr schema.GroupVersionResource) error {
-	crd, err := crdclient.Get(ctx, m.kube, gvr.GroupResource())
-	if err != nil {
-		return fmt.Errorf("error getting CRD: %w", err)
-	}
-	if crd == nil {
-		return apierrors.NewNotFound(gvr.GroupResource(), gvr.Resource)
-	}
-
-	crd.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "apiextensions.k8s.io",
-		Kind:    "CustomResourceDefinition",
-		Version: "v1",
-	})
-
-	if len(crd.Spec.Versions) > 1 {
-		m.log("Updating CA bundle for CRD", "Name", crd.Name)
-		err = crdutils.UpdateCABundle(crd, cabundle)
-		if err != nil {
-			return fmt.Errorf("error updating CA bundle: %w", err)
-		}
-		// Update the CRD with the new CA bundle
-		err = kube.Apply(ctx, m.kube, crd, kube.ApplyOptions{})
-		if err != nil {
-			return fmt.Errorf("error applying CRD: %w", err)
-		}
-	}
-
 	// Update the mutating webhook config with the new CA bundle
 	mutatingWebhookConfig := admissionregistrationv1.MutatingWebhookConfiguration{}
-	err = objects.CreateK8sObject(&mutatingWebhookConfig,
+	err := objects.CreateK8sObject(&mutatingWebhookConfig,
 		schema.GroupVersionResource{},
 		types.NamespacedName{},
 		m.mutatingWebhookTemplatePath,

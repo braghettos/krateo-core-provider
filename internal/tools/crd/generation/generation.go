@@ -21,19 +21,6 @@ var statusJsonSchema []byte
 //go:embed statics/empty.schema.json
 var emptyJsonSchema []byte
 
-func UpdateCABundle(crd *apiextensionsv1.CustomResourceDefinition, caBundle []byte) error {
-	// Generated CRDs use the None conversion strategy (no webhook), so there is no
-	// conversion CA bundle to propagate - skip rather than error.
-	if crd.Spec.Conversion == nil ||
-		crd.Spec.Conversion.Webhook == nil ||
-		crd.Spec.Conversion.Webhook.ClientConfig == nil {
-		return nil
-	}
-
-	crd.Spec.Conversion.Webhook.ClientConfig.CABundle = caBundle
-	return nil
-}
-
 func SetServedStorage(crd *apiextensionsv1.CustomResourceDefinition, version string, served, storage bool) {
 	for i := range crd.Spec.Versions {
 		if crd.Spec.Versions[i].Name == version {

@@ -15,7 +15,6 @@ import (
 	"github.com/krateoplatformops/core-provider/internal/controllers/certificates"
 	"github.com/krateoplatformops/core-provider/internal/controllers/compositiondefinitions/helpers/getters"
 	"github.com/krateoplatformops/core-provider/internal/controllers/compositiondefinitions/helpers/status"
-	"github.com/krateoplatformops/core-provider/internal/controllers/compositiondefinitions/webhooks/conversion"
 	"github.com/krateoplatformops/core-provider/internal/controllers/compositiondefinitions/webhooks/mutation"
 	webhooktelemetry "github.com/krateoplatformops/core-provider/internal/telemetry/webhooks"
 	"github.com/krateoplatformops/core-provider/internal/tools/chart"
@@ -39,7 +38,6 @@ import (
 	"github.com/krateoplatformops/provider-runtime/pkg/resource"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/discovery/cached/memory"
 	"k8s.io/client-go/dynamic"
@@ -102,9 +100,8 @@ func Setup(mgr ctrl.Manager, o Options) error {
 		l.Debug("Failed to cleanup obsolete finalizer labels on startup", "error", err)
 	}
 
-	compositionConversionWebhook := conversion.NewWebhookHandler(runtime.NewScheme(), o.WebhookMetrics)
+	// Generated CRDs use the None conversion strategy, so no /convert webhook is needed.
 	mgr.GetWebhookServer().Register("/mutate", mutation.NewWebhookHandler(apiReader, o.WebhookMetrics))
-	mgr.GetWebhookServer().Register("/convert", compositionConversionWebhook)
 
 	r := reconciler.NewReconciler(mgr,
 		resource.ManagedKind(compositiondefinitionsv1alpha1.CompositionDefinitionGroupVersionKind),
