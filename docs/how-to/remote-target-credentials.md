@@ -160,9 +160,17 @@ listing and migration) is stamped by a cluster-wide **`MutatingAdmissionPolicy`*
 in-apiserver CEL, no webhook server or cert.
 
 Because composition **instances are created in the target cluster**, that policy must
-exist **in the target**, not just the management cluster. core-provider does not install
-it (it's declarative); install the `target-chart` from the core-provider chart repo into
-**every cluster referenced by a `KubernetesTarget`**, as part of target onboarding:
+exist **in the target**, not just the management cluster. For remote targets core-provider
+**projects the policy into the target automatically** during bootstrap (create-if-absent,
+alongside the generated CRD + RBAC + CDC), so no manual onboarding step is required. The
+target credential must therefore allow creating `MutatingAdmissionPolicy` /
+`MutatingAdmissionPolicyBinding` (cluster-scoped, group `admissionregistration.k8s.io`) in
+addition to CRDs, RBAC and Deployments.
+
+The projection is create-if-absent: if you prefer to manage the policy declaratively
+yourself (or already ship it via a chart), an existing policy in the target is left
+untouched. To install it explicitly, apply the `target-chart` from the core-provider chart
+repo into the target cluster:
 
 ```bash
 helm install krateo-core-provider-target oci://<registry>/krateo-core-provider-target \

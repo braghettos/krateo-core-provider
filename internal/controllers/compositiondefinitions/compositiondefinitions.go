@@ -25,6 +25,7 @@ import (
 	"github.com/krateoplatformops/core-provider/internal/tools/deploy"
 	"github.com/krateoplatformops/core-provider/internal/tools/kube"
 	pluralizerlib "github.com/krateoplatformops/core-provider/internal/tools/pluralizer"
+	"github.com/krateoplatformops/core-provider/internal/tools/policy"
 	rtv1 "github.com/krateoplatformops/provider-runtime/apis/common/v1"
 	"github.com/krateoplatformops/provider-runtime/pkg/controller"
 
@@ -92,9 +93,10 @@ func Setup(mgr ctrl.Manager, o Options) error {
 	}
 
 	// core-provider hosts no admission webhooks: generated CRDs use None conversion, and
-	// the composition-version label is stamped by a MutatingAdmissionPolicy shipped
-	// declaratively by the chart (it must exist in every cluster a composition CRD lives
-	// in, including remote targets; requires Kubernetes >= 1.36).
+	// the composition-version label is stamped by a MutatingAdmissionPolicy that must exist
+	// in every cluster a composition CRD lives in (requires Kubernetes >= 1.36). On the
+	// management cluster the chart ships it; for remote targets core-provider projects it
+	// into the target during bootstrap (see external.ensureCompositionVersionPolicy).
 
 	r := reconciler.NewReconciler(mgr,
 		resource.ManagedKind(compositiondefinitionsv1alpha1.CompositionDefinitionGroupVersionKind),
@@ -338,6 +340,21 @@ func (e *external) setTargetStatus(cr *compositiondefinitionsv1alpha1.Compositio
 	cr.Status.Target = ts
 }
 
+// ensureCompositionVersionPolicy projects the cluster-wide composition-version
+// MutatingAdmissionPolicy into a remote target. The label it stamps is what per-version
+// listing/migration and safe deletion rely on; for local targets the management chart
+// already ships the policy, so this only acts on remote targets. Create-if-absent, so it
+// never fights a chart- or operator-managed policy already present in the target.
+func (e *external) ensureCompositionVersionPolicy(ctx context.Context) error {
+	if !e.remote {
+		return nil
+	}
+	if err := policy.EnsureCompositionVersionPolicy(ctx, e.kube); err != nil {
+		return fmt.Errorf("error projecting composition-version policy into target: %w", err)
+	}
+	return nil
+}
+
 func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler.ExternalObservation, error) {
 	cr, ok := mg.(*compositiondefinitionsv1alpha1.CompositionDefinition)
 	if !ok {
@@ -546,6 +563,10 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) error {
 		return fmt.Errorf("error applying or updating CRD: %w", err)
 	}
 
+	if err := e.ensureCompositionVersionPolicy(ctx); err != nil {
+		return err
+	}
+
 	opts := deploy.DeployOptions{
 		RBACFolderPath:         CDCrbacConfigFolder,
 		DiscoveryClient:        memory.NewMemCacheClient(e.client.Discovery()),
@@ -616,6 +637,10 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 	gvr, err := crdclient.ApplyOrUpdateCRD(ctx, e.kube, e.dynamic, crd)
 	if err != nil {
 		return fmt.Errorf("error applying or updating CRD: %w", err)
+	}
+
+	if err := e.ensureCompositionVersionPolicy(ctx); err != nil {
+		return err
 	}
 
 	opts := deploy.DeployOptions{

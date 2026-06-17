@@ -23,6 +23,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/discovery"
@@ -494,6 +495,25 @@ func Undeploy(ctx context.Context, kube client.Client, opts UndeployOptions) err
 	}
 
 	log := contexttools.LoggerFromCtx(ctx, logging.NewNopLogger())
+
+	// Safety net: when this teardown will delete the CRD (!SkipCRD), never proceed while
+	// live composition instances still exist. The controller drains instances per-version
+	// using the krateo.io/composition-version label (stamped by a MutatingAdmissionPolicy);
+	// if that policy is absent in the target the label-filtered drain is a silent no-op, so
+	// guard here with an UNFILTERED list before tearing anything down. Refusing up front
+	// keeps the CDC alive to finalize those instances instead of orphaning them, and
+	// prevents the CRD deletion from cascade-garbage-collecting every instance.
+	if !opts.SkipCRD {
+		remaining, err := opts.DynamicClient.Resource(opts.GVR).Namespace(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			return fmt.Errorf("error listing composition instances before teardown: %w", err)
+		}
+		if len(remaining.Items) > 0 {
+			log.Debug("Refusing to undeploy while composition instances still exist",
+				"gvr", opts.GVR.String(), "count", len(remaining.Items))
+			return ErrCompositionStillExist
+		}
+	}
 
 	sa, clusterrole, clusterrolebinding, role, rolebinding, err := createRBACResources(opts.GVR, getCDCrbacNN(namespacedName), opts.RBACFolderPath)
 	if err != nil {
