@@ -47,9 +47,17 @@
 > **Cascading payoff:** with both `/convert` (None) and `/mutate` (policy) gone, core-provider
 > has **no admission webhooks at all** → the webhook server, serving cert, the whole
 > `certManager` + cert-reconciler, and the `MutatingWebhookConfiguration` template become
-> removable. For remote targets, core-provider applies the policy into the target instead of
-> projecting a webhook. (Follow-up PR; also removes the now-dead `/convert` +
-> `webhooks/conversion`.)
+> removable.
+>
+> **Remote-target policy projection — implemented.** For remote targets core-provider now
+> projects the `MutatingAdmissionPolicy` (+ binding) into the target during bootstrap
+> (`internal/tools/policy`, create-if-absent, called from `Create`/`Update` when
+> `e.remote`), so the version label is reliably stamped without a manual onboarding step;
+> an existing/chart-managed policy is left untouched. The label is load-bearing for safe
+> deletion, so `deploy.Undeploy` also gained a guard: when a teardown would delete the CRD
+> it first does an **unfiltered** list of instances and refuses with
+> `ErrCompositionStillExist` if any remain — preventing a missing/lagging policy from
+> letting a CRD delete cascade-garbage-collect live composition instances.
 >
 > **e2e-validated (2026-06-13):** the remote-targeting path was exercised against real
 > clusters — a kind management cluster + a disposable single-node GKE target, with a
