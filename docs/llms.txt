@@ -1,0 +1,44 @@
+# core-provider (code repo) — LLM doc index
+
+> core-provider is the Krateo controller that turns a Helm chart into a Kubernetes-native API: for
+> each `CompositionDefinition` it generates a versioned CRD from the chart's `values.schema.json`,
+> then deploys a per-version **composition-dynamic-controller (CDC)** (Deployment + ConfigMaps +
+> RBAC) that reconciles instances of that CRD. It hosts no admission webhooks (since 2.0.0). This
+> index is the agent entry point to the **internals & runtime** view. The **deployment, CRD and
+> wiring** view lives in the chart repo `braghettos/krateo-core-provider-chart` `docs/`.
+
+## How to use this index (agents)
+
+You are reading docs for a SPECIFIC deployed version. Fetch every file below **at the tag that
+matches the running build**, not `main`:
+- image version = the core-provider Deployment's container image tag (→ THIS repo's tag, == the
+  chart `appVersion`). Read this repo's docs at the **image-version** tag.
+- chart version = `CompositionDefinition.spec.chart.version` is the *managed chart's* version, NOT
+  core-provider's own. core-provider's deployment/CRD view is in `braghettos/krateo-core-provider-chart`
+  `docs/` at that chart's tag.
+
+If something isn't in these docs, read the source at the same tag — don't guess, and don't trust
+`main` for a deployed older version.
+
+## Start here
+
+- [architecture.md](architecture.md): how the service is built — the entry point (`main.go`), the
+  single `CompositionDefinition` controller, and the tool packages that do the work (chart fetch →
+  CRD generation → CDC deploy). Read first.
+
+## Internals & runtime
+
+- [behavior.md](behavior.md): the reconcile lifecycle (Observe/Create/Update/Delete), the CRDs it
+  owns (`CompositionDefinition`, `KubernetesTarget`), what it deploys per version, local-vs-remote
+  targeting, the digest-based idempotency contract, and the metrics endpoint.
+- [gotchas.md](gotchas.md): real runtime pitfalls — Kubernetes >= 1.36 requirement, the
+  MutatingAdmissionPolicy dependency, runtime asset templates loaded from disk, multi-version CRD
+  ownership, deletion ordering, and credential/secret watches.
+
+## Reference (source of truth)
+
+- `apis/compositiondefinitions/v1alpha1/types.go` — the `CompositionDefinition` and `KubernetesTarget`
+  Go types (source of truth for CRD fields).
+- `crds/` — the generated CRD manifests for this provider's own two CRDs.
+- `README.md` — product overview + the 2.0.0 local/remote and Kubernetes >= 1.36 notes.
+- `telemetry/metrics-reference.md` — the OTLP metric catalog (opt-in via `OTEL_ENABLED`).
