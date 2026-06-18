@@ -20,10 +20,14 @@
 1. **The status subresource already exists** on generated Composition CRDs; this work
    is *not* about adding one. It is about making the status **declarative and
    chart-customisable**, plus closing small gaps (`observedGeneration`).
-2. Add `spec.additionalStatusFields` to `CompositionDefinition`, a list of
-   **field mappings** `{ to, source, expression }`. core-provider injects matching
-   properties into the generated CRD's status schema (so they survive subresource
-   pruning); the CDC fills them each reconcile (worked end-to-end example in §4.1).
+2. **Reuse the snowplow/frontend convention (§3.2, recommended):** declare data sources as
+   **`resourcesRefs`** (GVR refs with an `id`) and the projection as a **`*DataTemplate`**
+   list of `{ forPath, expression }` with **`${ jq }`** — the exact shape and engine
+   (`plumbing/jqutil`, incl. `MaybeQuery`/`InferType`) the frontend BFF already uses. So
+   composition status and frontend widgets speak one templating language. (§4 shows an
+   earlier bespoke `additionalStatusFields` framing for reference.) core-provider injects
+   matching properties into the generated CRD's status schema (so they survive subresource
+   pruning); the CDC fills them each reconcile (worked example §4.1).
 3. Put the **generic projection engine in `unstructured-runtime`** (a new
    `pkg/tools/statusprojection` package). It takes a CR, one or more **named sources**
    (the CR's own `spec`; the Helm metadata; and — crucially — the **live managed
@@ -175,47 +179,74 @@ checks can read them. The only knobs are the five hard-coded fields.
 
 ## 3. The unifying model
 
+> **Core abstraction: a source is a GVR-referenced object (or set), and the Composition is
+> just the `self` source.** Everything — reading a spec field, a managed Service's IP,
+> summing over Deployments — is "run a jq program against the live content of some
+> object(s) identified by a GVR". There are no special-cased sources; `spec`/`status` are
+> simply views of the `self` GVR.
+
 A status projection is a pure function:
 
 ```
-project(sources: map[string]any, mappings: []Mapping) -> patch applied to CR .status
+project(cr, resolved: map[string]any, mappings: []Mapping) -> patch applied to cr .status
 ```
 
-where a **source** is a named root document the engine evaluates a **jq program**
-against, and a **Mapping** is:
+`resolved` maps a **source name** to the **already-fetched document** for that source — a
+single object's content, or an array for a set/selector source. The provider (CDC/RDC)
+resolves each declared source's GVR ref into `resolved` and hands it in; the engine itself
+does **no** cluster I/O and just evaluates jq.
+
+A **Source** identifies what to read:
+
+```
+Source {
+  Name       string   // referenced by Mapping.source
+  // a GVR reference:
+  APIVersion string    // e.g. "v1", "apps/v1"
+  Kind       string    // e.g. "Service", "Deployment"
+  // exactly one selection mode:
+  Self       bool             // the Composition CR itself (its own GVR) — no I/O, the CDC already holds it
+  Name_      string           // a single object by name (often label-matched instead, since chart names are templated)
+  Selector   *LabelSelector   // a SET -> the resolved doc is an array (enables aggregation)
+}
+```
+
+and a **Mapping**:
 
 ```
 Mapping {
   To         string   // dotted path under status to write, e.g. "endpoint" or "network.host"
-  Source     string   // which named source Expression runs against; default "spec"
-  Expression string   // a jq program evaluated against Source (plumbing/jqutil)
-  Type       string   // OPTIONAL: pin the generated status property's JSON-schema type
+  Source     string   // a source name; built-ins: "self" (== the Composition), "spec"/"status"
+                       //   (sugar for self|.spec / self|.status), "helm"; default "spec"
+  Expression string   // a jq program evaluated against the resolved source (plumbing/jqutil)
+  Type       string   // OPTIONAL scalar type pin (complex shapes: Schema / PreserveUnknownFields)
 }
 ```
 
-A jq program subsumes both "which field" and "how to transform it" in one value, so there
-is no separate `from`/`transform` split:
+A jq program subsumes "which field" and "how to transform it", so there is no
+`from`/`transform` split:
 
-- **plain copy** — `Expression: .service.host` (read `spec.service.host` verbatim);
-- **derived** — `Expression: "https://\(.service.host):\(.service.port)"`;
-- **rollup / computed** — `Expression: '[.replicas, 1] | max'`.
+- **plain copy** — `source: spec`, `expression: .service.host`;
+- **derived** — `expression: "https://\(.service.host):\(.service.port)"`;
+- **from another object** — `source: web` (a `Service` GVR), `expression: .status.loadBalancer.ingress[0].ip`;
+- **aggregate over a set** — `source: deploys` (a selector), `expression: '[ .[].status.readyReplicas // 0 ] | add'`.
 
 This is also exactly oasgen's `additionalStatusFields: [id, uuid]` re-expressed as
-`[{to: id, expression: .id}, {to: uuid, expression: .uuid}]`.
+`[{to: id, expression: .id}, {to: uuid, expression: .uuid}]` with the API response as the
+source.
 
-The provider decides **which sources exist** and **where the mappings come from**:
+### Built-in vs declared sources
 
-| Provider | Sources it supplies | Mapping origin |
-|---|---|---|
-| core-provider / CDC | `spec` (the CR's own spec = chart values), `helm` (release metadata), `managed` (the **array of live managed resources** the chart created — for extraction/aggregation, §4.3; Phase 2) | `CompositionDefinition.spec.additionalStatusFields` |
-| oasgen / RDC | `response` (API GET/FINDBY body), `spec` | `RestDefinition.spec.resource.additionalStatusFields` (+ `identifiers`) |
+| Source | Resolves to | I/O / cost | Phase |
+|---|---|---|---|
+| `self` (and `spec`/`status` sugar) | the Composition CR the CDC is already reconciling | none | 1 |
+| `helm` | Helm release metadata the CDC holds (the one non-GVR, synthetic source) | none | 1 |
+| **declared GVR source** (a named object or a selector set) | live managed object(s) the composition created | fetch + watch | 2 (§4.3/§7) |
+| `response` (RDC only) | the API GET/FINDBY body RDC already has | none | — |
 
-The `managed` source is the key one for Compositions: status values such as an allocated
-LB IP or a rolled-up `readyReplicas` live on the rendered objects, not on the spec (§4.3).
-
-The engine is identical; only the source maps and the mapping list differ. This is the
-core of G3: **`additionalStatusFields` (response→status) and our new spec→status
-projection are the same operation over different sources.**
+The engine is identical across providers; only which sources are resolved differs. This is
+the core of G3: response→status, spec→status, and managed-object→status are all the **same
+operation over a different source object**.
 
 ### 3.1 Transform language — two proposals: jq vs CEL
 
@@ -259,21 +290,112 @@ under CEL the sources are bound as variables (`spec`, `helm`, `self`):
   transform convention (the platform and RDC already speak jq); weaker at list/data
   reshaping than jq.
 
-**Recommendation: Proposal A (jq).** It is already a dependency, matches platform
-convention, and its native type preservation subsumes the very work RDC's #42 branch is
-doing by hand. CEL's main edge (compile-time typing) is marginal here because the status
-schema type can be pinned with `Type` when it matters. `sprig`/Go templates are a distant
-third (stringly-typed) and not carried further.
+**Recommendation: Proposal A (jq).** Reinforced by §3.2: jq via `plumbing/jqutil` is not
+just *a* Krateo convention, it is the **exact mechanism the frontend/snowplow already use**
+for the same job (shaping data into a target structure), down to the `${ }` wrapper and the
+`jqutil.InferType` typing helper. CEL would fork the platform off its established
+data-templating language. `sprig`/Go templates are a distant third (stringly-typed).
+
+### 3.2 Recommended API shape — reuse the snowplow/frontend `resourcesRefs` + `*DataTemplate` convention
+
+> **This is the recommended surface; §4's field names are an earlier framing kept for
+> reference.** Krateo's frontend BFF (**snowplow**) already solves *exactly this problem* —
+> "fetch some objects/APIs, then project/transform their data into a target structure" —
+> with a battle-tested convention. We should reuse it verbatim so composition status and
+> frontend widgets speak one language.
+
+Snowplow widgets declare (`snowplow/apis/templates/v1`):
+
+- **`resourcesRefs.items[]`** — a list of **GVR references each with an `id`**
+  (`{id, apiVersion, resource, name, namespace, verb}`); snowplow fetches them and exposes
+  each under its `id`.
+- **`apiRef`** — a reference to a `RESTAction` (named API calls) whose responses are
+  likewise keyed.
+- **`widgetData`** — the base/default data structure.
+- **`widgetDataTemplate[]`** — `{ forPath, expression }` where `expression` is a
+  **`${ jq }`** program evaluated against the **combined keyed root** of all
+  resourcesRefs/apiRef results, written into `widgetData` at `forPath`.
+
+The resolver (`internal/resolvers/widgets/widgetdatatemplate/resolve.go`) is literally our
+engine: `jqutil.MaybeQuery` (strip `${ }`) → `jqutil.Eval` → **`jqutil.InferType`** (typed
+value). So the "normalization/type-inference" §4.2 calls for is **already implemented in
+`plumbing` and in production**.
+
+**Applied to composition status**, the `CompositionDefinition` would carry:
+
+```yaml
+spec:
+  chart: { url: oci://…/fireworksapp, version: 1.2.0 }
+  # GVR sources, snowplow shape — each id becomes a key in the jq root.
+  # "self" (the Composition) and "helm" are implicit built-ins.
+  resourcesRefs:
+    items:
+      - id: web
+        apiVersion: v1
+        resource: services
+        selector: { app.kubernetes.io/name: web }   # label-scoped; names are templated
+        verb: GET
+      - id: deploys
+        apiVersion: apps/v1
+        resource: deployments
+        selector: { krateo.io/composition-id: "{{ .metadata.uid }}" }
+        verb: LIST                                   # a set -> array under .deploys
+  # projection, snowplow widgetDataTemplate shape:
+  statusDataTemplate:
+    - forPath: url                                   # status.url
+      expression: ${ "https://\(.self.spec.service.host):\(.self.spec.service.port)" }
+    - forPath: endpoint                              # from the Service GVR
+      expression: ${ .web.status.loadBalancer.ingress[0].ip }
+    - forPath: readyReplicas                         # aggregate across the Deployment set
+      expression: ${ [ .deploys[].status.readyReplicas // 0 ] | add }
+```
+
+**Mapping from §3/§4's framing to this convention:**
+
+| §3/§4 (earlier framing) | snowplow convention (recommended) |
+|---|---|
+| `statusSources[]` (`name`+GVR) | **`resourcesRefs.items[]`** (`id`+GVR+`verb`) — same idea, existing schema |
+| per-mapping `source` field | **dropped** — jq addresses each source by its `id` key in one combined root (`.web`, `.deploys`, `.self`, `.helm`) |
+| `additionalStatusFields[].{to, expression}` | **`statusDataTemplate[].{forPath, expression}`** with `${ }`-wrapped jq |
+| engine normalization/`Type` inference | **`jqutil.InferType`** (already exists) + optional `Schema`/`type` pin for complex shapes |
+
+**Why this is the right call:**
+
+- **One platform language.** A Krateo author who writes widget `widgetDataTemplate`s
+  already knows how to write composition `statusDataTemplate`s — same `${ jq }`, same keyed
+  root, same `resourcesRefs`.
+- **Maximal reuse, minimal new code.** The schema types and the resolver already exist in
+  `snowplow`/`plumbing`. The clean move is to **lift the shared types
+  (`Reference`/`ResourceRef`/`*DataTemplate`) and the resolver into `plumbing`** (or a small
+  shared module) so snowplow (frontend BFF), the CDC, and RDC all consume one
+  implementation — the `unstructured-runtime` `statusprojection` engine becomes a thin
+  adapter over it.
+- **Validates every earlier decision** (jq, keyed multi-source root, GVR sources, type
+  inference) by showing they already exist and interoperate in production.
+
+The remaining design content (schema generation §5, the pure-engine/CDC-fetches split
+§4.3/§6, phasing §8 — `self`/`helm` in Phase 1, `resourcesRefs` GVR fetch/watch in Phase 2)
+is **unchanged**; only the *spelling* of the API moves to the snowplow convention.
 
 ---
 
-## 4. API: `CompositionDefinition.spec.additionalStatusFields`
+## 4. API (earlier framing — see §3.2 for the recommended snowplow-convention shape)
 
 ```go
 // apis/compositiondefinitions/v1alpha1/types.go
 type CompositionDefinitionSpec struct {
     Chart  *ChartInfo        `json:"chart,omitempty"`
     Deploy *DeploymentTarget `json:"deploy,omitempty"`
+
+    // StatusSources declares the object(s) status fields may be projected from, beyond the
+    // built-in "self"/"spec"/"status"/"helm". Each is a GVR reference resolved to a live
+    // object (by name/labels) or a set (selector). Resolving these requires fetching +
+    // watching the referenced resources (Phase 2). Sources must stay within the
+    // composition's own managed resources (RBAC; §4.3/§11).
+    // +optional
+    // +listType=map
+    // +listMapKey=name
+    StatusSources []StatusSource `json:"statusSources,omitempty"`
 
     // AdditionalStatusFields declares extra fields projected onto the generated
     // Composition CRD's status and populated by the controller each reconcile.
@@ -283,14 +405,35 @@ type CompositionDefinitionSpec struct {
     AdditionalStatusFields []StatusFieldMapping `json:"additionalStatusFields,omitempty"`
 }
 
+// StatusSource is a GVR reference the projection can read. The Composition itself is the
+// built-in "self" source and needs no declaration.
+type StatusSource struct {
+    // Name is how mappings reference this source.
+    // +required
+    Name string `json:"name"`
+    // APIVersion + Kind identify the GVR, e.g. {apiVersion: v1, kind: Service}.
+    // +required
+    APIVersion string `json:"apiVersion"`
+    // +required
+    Kind string `json:"kind"`
+    // Selector matches a SET of objects (resolved doc is an array → aggregation). Prefer
+    // this over a hard-coded name: chart-rendered names are templated, and the CDC already
+    // labels managed resources (e.g. krateo.io/composition-id) to scope to this instance.
+    // +optional
+    Selector *metav1.LabelSelector `json:"selector,omitempty"`
+    // Name optionally selects a single object by name (mutually exclusive with Selector).
+    // +optional
+    ResourceName string `json:"resourceName,omitempty"`
+}
+
 type StatusFieldMapping struct {
     // To is the dotted path under .status to write, e.g. "endpoint" or "network.host".
     // +required
     To string `json:"to"`
 
-    // Source names the document Expression is evaluated against. Default "spec"
-    // (the Composition's own spec == the chart values). Allowed (CDC): "spec", "helm".
-    // (RDC additionally: "response".)
+    // Source names the object Expression is evaluated against: a built-in ("self", or its
+    // "spec"/"status" sugar, "helm") or a StatusSources[].name. Default "spec".
+    // (RDC additionally has the built-in "response".)
     // +optional
     // +kubebuilder:default=spec
     Source string `json:"source,omitempty"`
@@ -463,61 +606,78 @@ Two rules and one runtime caveat govern this:
   warnings RDC's #42 hit. This normalization is the engine's job (one more reason it is
   shared, not per-provider).
 
-### 4.3 Sourcing from managed resources (and aggregating across them)
+### 4.3 GVR sources: the composition itself, and its managed resources
 
-The most valuable status values usually do **not** come from the Composition's own spec —
-they come from the **live managed resources the chart created** (the GVRs tracked in
-`status.managed[]`): a `Service`'s allocated LB IP, a `Deployment`'s `readyReplicas`, a
-generated `Secret`'s field — or a **sum/rollup across several** of them. This is a
-first-class source.
-
-Add a `managed` source whose document is the **array of fetched live managed objects**
-(each the full object, so `kind`/`metadata`/`spec`/`status` are all reachable). jq then
-selects one or aggregates many — exactly its strength:
+The general rule (§3) is that **a source is a GVR reference**. The Composition is the
+built-in `self` source (its own GVR — already in hand, no I/O); the most valuable status
+values, though, live on the **managed resources the composition created** (a `Service`'s
+allocated LB IP, a `Deployment`'s `readyReplicas`, a generated `Secret` field) — possibly
+**aggregated across several**. Those are declared as `statusSources` (§4) and resolved by
+the CDC into the object(s) jq runs against:
 
 ```yaml
-additionalStatusFields:
-  # single resource: a Service's load-balancer IP
-  - to: endpoint
-    source: managed
-    type: string
-    expression: '[ .[] | select(.kind=="Service" and .metadata.name=="web")
-                       | .status.loadBalancer.ingress[0].ip ] | first'
+spec:
+  statusSources:
+    web:                                   # a single Service (label-scoped, names are templated)
+      apiVersion: v1
+      kind: Service
+      selector: { matchLabels: { app.kubernetes.io/name: web } }
+    deploys:                               # a SET of Deployments -> resolved doc is an array
+      apiVersion: apps/v1
+      kind: Deployment
+      selector: { matchLabels: { krateo.io/composition-id: "{{ .metadata.uid }}" } }
+  additionalStatusFields:
+    # from the composition itself (self/spec) — Phase 1, no I/O
+    - to: url
+      source: spec
+      expression: '"https://\(.service.host):\(.service.port)"'
 
-  # SUM across resources: total ready replicas over all Deployments
-  - to: readyReplicas
-    source: managed
-    type: integer
-    expression: '[ .[] | select(.kind=="Deployment") | .status.readyReplicas // 0 ] | add'
+    # from a single managed object — Phase 2
+    - to: endpoint
+      source: web                          # the Service GVR source above
+      type: string
+      expression: '.status.loadBalancer.ingress[0].ip'
 
-  # CONCAT across resources: every ingress host the composition exposes
-  - to: hosts
-    source: managed
-    schema: { type: array, items: { type: string } }
-    expression: '[ .[] | select(.kind=="Ingress") | .spec.rules[].host ] | unique'
+    # AGGREGATE across a managed set — Phase 2
+    - to: readyReplicas
+      source: deploys                      # resolved doc is the array of Deployments
+      type: integer
+      expression: '[ .[].status.readyReplicas // 0 ] | add'
+
+    - to: hosts
+      source: deploys
+      schema: { type: array, items: { type: string } }
+      expression: '[ .[].spec.template.metadata.annotations["host"] ] | map(select(.)) | unique'
 ```
 
-**This stays compatible with the "pure engine" rule by moving the I/O to the CDC.** The
-engine never reads the cluster; the **CDC fetches the managed objects** (it already holds
-`status.managed[]`, and Phase 2's readiness rollup needs the very same fetch — §7) and
-passes them in:
+A built-in `managed` set source (the union of everything in `status.managed[]`) is offered
+as a convenience for "aggregate across all my resources" without declaring a selector.
+
+**The "pure engine" rule holds: the CDC does the I/O, the engine does not.** The CDC
+resolves each source's GVR ref (GVR→GVK, fetch by name or list-by-selector — scoped to the
+composition's own resources via the labels the CDC already stamps) and passes the resolved
+documents in; Phase 2's readiness rollup needs the *same* fetch (§7):
 
 ```go
-managed := h.fetchManaged(ctx, mg)            // []any of live unstructured objects
-sources := map[string]any{"helm": …, "managed": managed}
-_ = statusprojection.Project(mg, sources, mappings)
+resolved := map[string]any{"helm": …}
+for _, s := range sources {               // declared StatusSources
+    resolved[s.Name] = h.resolve(ctx, mg, s)   // single obj or []any for a selector
+}
+_ = statusprojection.Project(mg, resolved, mappings)  // "self"/"spec"/"status" come from mg
 ```
 
-**Cost — this is the real trade-off.** `spec`/`helm` projection is free (no extra reads).
-`managed` projection requires **fetching the managed set every reconcile**, and to keep
-those values *fresh* the CDC must **watch** the managed objects (otherwise a Service IP
-that arrives later only shows up on the next periodic resync). That is precisely the
-watch-cost called out in #14's open questions and needed for readiness rollup. So:
+**Cost — the real trade-off.** `self`/`spec`/`status`/`helm` are free (already in hand).
+A GVR source requires **fetching the referenced object(s) every reconcile**, and to keep
+values *fresh* the CDC must **watch** them (otherwise a late-arriving LB IP only appears on
+the next resync) — precisely the watch-cost in #14's open questions and shared with
+readiness rollup. So:
 
-- **Phase 1** ships `spec` + `helm` sources only — cheap, no new watches.
-- The **`managed` source ships with Phase 2** (§7/§8), sharing the fetch+watch machinery
-  with readiness rollup. The API (`source: managed`) is defined now so it is forward
-  compatible, but is rejected by validation until that phase lands.
+- **Phase 1** ships the in-hand sources (`self`/`spec`/`status`/`helm`) only — cheap, no
+  new watches.
+- **Declared GVR sources (incl. the `managed` convenience) ship in Phase 2** (§7/§8),
+  sharing the fetch+watch machinery with readiness rollup. `statusSources` and
+  `source: <gvr>` are defined now (forward compatible) but rejected by validation until
+  that phase lands.
 
 ---
 
@@ -579,15 +739,15 @@ type Mapping struct {
     To, Source, Expression string
 }
 
-// Project evaluates each mapping's Expression against its Source and writes the (typed,
-// normalized) result into cr's .status at To. `sources` maps a source name
-// ("spec","helm","managed","response",…) to a document; the CR's own spec is injected as
-// source "spec" automatically. Source documents that require I/O (e.g. "managed", the live
-// managed objects) are fetched by the CALLER and passed in — Project performs no client
-// calls. Expressions are jq programs run via plumbing/jqutil (gojq); compiled programs are
-// cached keyed by expression so each is parsed once across reconciles. Each result is
-// normalized to DeepCopyJSONValue-safe types (int->int64, etc.) before writing (§4.2).
-func Project(cr *unstructured.Unstructured, sources map[string]any, mappings []Mapping) error
+// Project evaluates each mapping's Expression against its resolved Source and writes the
+// (typed, normalized) result into cr's .status at To. `resolved` maps a source name to its
+// already-fetched document (a single object's content, or an array for a selector source);
+// the built-ins "self"/"spec"/"status" are derived from cr directly. Any source needing
+// cluster I/O (a declared GVR source) is resolved by the CALLER and passed in — Project
+// performs no client calls. Expressions are jq programs run via plumbing/jqutil (gojq),
+// compiled-and-cached per expression. Each result is normalized to DeepCopyJSONValue-safe
+// types (int->int64, etc.) before writing (§4.2).
+func Project(cr *unstructured.Unstructured, resolved map[string]any, mappings []Mapping) error
 
 // SetObservedGeneration writes status.observedGeneration = metadata.generation.
 func SetObservedGeneration(cr *unstructured.Unstructured)
@@ -610,7 +770,9 @@ Properties (note how each beats the RDC `populateStatusFields` limits from §1.4
 - **Output normalization** — every jq result is normalized to DeepCopyJSONValue-safe types
   (`int`→`int64`, JSON-native containers; integral floats re-narrowed) before
   `SetNestedField`, so complex values write without panics and integers stay integers
-  (§4.2). This subsumes RDC #42's type work.
+  (§4.2). **Reuse `jqutil.InferType` / `jqutil.MaybeQuery`** (already used by snowplow,
+  §3.2) rather than reimplementing — this subsumes RDC #42's type work and means the engine
+  is a thin adapter over existing `plumbing` code.
 - Errors are per-mapping and aggregated; a bad mapping degrades that field (and raises a
   `Synced=False/ReconcileError` reason) rather than failing the whole reconcile.
 
@@ -722,10 +884,14 @@ All work targets the **`braghettos`** forks (origin), with `krateoplatformops` k
 | unstructured-runtime | `braghettos/unstructured-runtime` | **forked + cloned** (did not exist before); `upstream` added |
 | oasgen-provider | `braghettos/oasgen-provider` | already checked out as `braghettos-oasgen-provider` |
 | rest-dynamic-controller | `braghettos/rest-dynamic-controller` | **repointed** (was `krateoplatformops`); `upstream` added. NB: fork `main` has **diverged** from upstream (not a clean ff) and carries the #40/#42 branches |
-| plumbing (`jqutil`, + schema helper if extracted) | `braghettos/plumbing` | already core-provider's `replace` target |
+| plumbing (`jqutil`; candidate home for the shared `resourcesRefs`/`*DataTemplate` types + resolver, §3.2) | `braghettos/plumbing` | already core-provider's `replace` target |
+| snowplow (frontend BFF — source of the `resourcesRefs`/`widgetDataTemplate` convention + resolver to share, §3.2) | `braghettos/snowplow` (fork to create) | not yet a fork; only needed if we lift its types/resolver into `plumbing` |
 
 go.mod consequences:
 
+- **Shared types/resolver (§3.2)**: lifting snowplow's convention into `plumbing` lets
+  snowplow, core-provider, CDC and RDC all depend on one implementation. Reconcile the
+  version skew (snowplow `plumbing v0.6.2` vs core-provider `braghettos v1.7.x`).
 - **`unstructured-runtime`**: `statusprojection` depends on `plumbing/jqutil` (jq,
   Proposal A) — so `unstructured-runtime` gains a `plumbing` dependency (pinned to the
   `braghettos` fork via `replace`). Under Proposal B it would instead pull `cel-go`. If
@@ -760,7 +926,14 @@ go.mod consequences:
 - **Mapping delivery to the CDC**: ConfigMap (recommended) vs. CRD annotation (§6.1) —
   confirm against the multi-cluster decoupling constraints.
 - **Transform dialect**: jq (Proposal A, recommended) vs CEL (Proposal B) — §3.1. Settle
-  before Phase 0.
+  before Phase 0. (§3.2's snowplow precedent strongly favours jq.)
+- **Shared-types home (§3.2)**: lift snowplow's `resourcesRefs`/`*DataTemplate`
+  `Reference`/`ResourceRef`/`WidgetDataTemplate` types and the
+  `widgetdatatemplate`/`resourcesRefs` resolver into **`plumbing`** (or a small shared
+  module) so snowplow, the CDC, and RDC share one implementation — vs. duplicating the
+  shape in `unstructured-runtime`. Decide the boundary; this is the biggest reuse lever.
+  Note snowplow currently pins `plumbing v0.6.2` while core-provider is on the `braghettos`
+  `v1.7.x` line — reconcile versions when lifting types.
 - **Engine dependency boundary**: does `statusprojection` import `plumbing/jqutil`
   directly (simple, but adds a `plumbing` dep to the generic runtime), or take an injected
   evaluator interface so `unstructured-runtime` stays dialect-agnostic and the provider
