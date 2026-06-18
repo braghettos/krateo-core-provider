@@ -196,6 +196,13 @@ type CompositionDefinitionSpec struct {
     // +optional
     ApiRef *Reference `json:"apiRef,omitempty"`
 
+    // Extras is author-declared context that seeds the RESTAction's jq root (the resolver's
+    // Extras hook, §4.3). Each value is a ${ jq } expression evaluated against the
+    // Composition instance each reconcile (or a literal); the CDC builds the map and passes
+    // it to snowplow. Lives alongside ApiRef because it parameterises its calls.
+    // +optional
+    Extras map[string]string `json:"extras,omitempty"`
+
     // StatusDataTemplate declares the projected status fields (snowplow widgetDataTemplate
     // shape). Each is evaluated over the combined source root and written under .status.
     // +optional
@@ -319,13 +326,21 @@ service-to-service entrypoint in snowplow**:
   caller); the execution machinery (`restactions` resolver, `SArc`) already exists,
 - accepts **caller context** via the resolver's existing **`Extras map[string]any`** hook
   (`apiref.Resolve` → `restactions.Resolve`): `Extras` seeds the jq root that each call's
-  `path`/`payload`/`headers`/`filter` is evaluated against
-  (`restactions/api/resolve.go:80`). So the CDC passes the composition's
-  `{ compositionId, namespace, name, spec }` as `Extras`, and the RESTAction's calls
-  reference them — e.g. a **label-scoped kube-API LIST** that needs no hard-coded
-  (chart-templated) names:
+  `path`/`payload`/`headers`/`filter` is evaluated against (`restactions/api/resolve.go:80`).
+
+  **Extras are author-declared on the `CompositionDefinition` (`spec.extras`, alongside
+  `apiRef`)** — the author decides what the RESTAction receives. Each value is a `${ jq }`
+  expression evaluated against the **Composition instance** (or a literal); the CDC builds
+  the map per reconcile and passes it to snowplow. This drives e.g. a **label-scoped
+  kube-API LIST** with no hard-coded (chart-templated) names:
 
   ```yaml
+  # on the CompositionDefinition, next to apiRef:
+  extras:
+    compositionId: ${ .metadata.uid }
+    namespace:     ${ .metadata.namespace }
+    region:        eu-west                 # a literal
+  # in the RESTAction, the calls read those extras:
   api:
     - name: deploys
       path: ${ "/apis/apps/v1/namespaces/\(.namespace)/deployments?labelSelector=krateo.io/composition-id=\(.compositionId)" }
@@ -420,13 +435,11 @@ resolved := map[string]any{
                            "version": pkg.Version, "status": rel.Info.Status.String()},
 }
 if cd.Spec.ApiRef != nil {                                  // Phase 2
-    extras := map[string]any{                              // becomes the RESTAction jq root
-        "compositionId": mg.GetUID(), "namespace": mg.GetNamespace(),
-        "name": mg.GetName(), "spec": mg.Object["spec"],
-    }
+    extras := evalExtras(cd.Spec.Extras, mg)              // author-declared ${ jq } over the instance
     api, err := snowplow.Resolve(ctx, cd.Spec.ApiRef, extras)   // own-SA service call; Extras hook
     if err == nil { resolved["api"] = api } else { /* degrade, set ReconcileError */ }
 }
+// evalExtras: for each k -> v, jqutil.Eval(v) over mg if v is ${…}, else the literal.
 _ = statusprojection.Project(mg, resolved, mappings)        // "self"/"spec"/"status" from mg
 statusprojection.SetObservedGeneration(mg)
 _, err = tools.UpdateStatus(ctx, mg, tools.UpdateOptions{Pluralizer: h.pluralizer, DynamicClient: h.dynamicClient})
