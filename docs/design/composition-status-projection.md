@@ -317,7 +317,23 @@ service-to-service entrypoint in snowplow**:
 - runs under `rest.InClusterConfig()` (snowplow's SA), **not** the user-scoped `/call`
   path (which forces `UserConfig`, per-user identity — there is no "user" for a backend
   caller); the execution machinery (`restactions` resolver, `SArc`) already exists,
-- accepts **caller context** (composition id/spec) so templated calls resolve per-instance.
+- accepts **caller context** via the resolver's existing **`Extras map[string]any`** hook
+  (`apiref.Resolve` → `restactions.Resolve`): `Extras` seeds the jq root that each call's
+  `path`/`payload`/`headers`/`filter` is evaluated against
+  (`restactions/api/resolve.go:80`). So the CDC passes the composition's
+  `{ compositionId, namespace, name, spec }` as `Extras`, and the RESTAction's calls
+  reference them — e.g. a **label-scoped kube-API LIST** that needs no hard-coded
+  (chart-templated) names:
+
+  ```yaml
+  api:
+    - name: deploys
+      path: ${ "/apis/apps/v1/namespaces/\(.namespace)/deployments?labelSelector=krateo.io/composition-id=\(.compositionId)" }
+      endpointRef: { name: kube-local, namespace: demo-system }
+  ```
+
+  (`apiref.Resolve` returns the in-memory `ra.Status` — it persists nothing, consistent
+  with §3.3.)
 
 **Two consequences to design for:**
 
@@ -404,7 +420,11 @@ resolved := map[string]any{
                            "version": pkg.Version, "status": rel.Info.Status.String()},
 }
 if cd.Spec.ApiRef != nil {                                  // Phase 2
-    api, err := snowplow.Resolve(ctx, cd.Spec.ApiRef, contextFor(mg))   // own-SA service call
+    extras := map[string]any{                              // becomes the RESTAction jq root
+        "compositionId": mg.GetUID(), "namespace": mg.GetNamespace(),
+        "name": mg.GetName(), "spec": mg.Object["spec"],
+    }
+    api, err := snowplow.Resolve(ctx, cd.Spec.ApiRef, extras)   // own-SA service call; Extras hook
     if err == nil { resolved["api"] = api } else { /* degrade, set ReconcileError */ }
 }
 _ = statusprojection.Project(mg, resolved, mappings)        // "self"/"spec"/"status" from mg
@@ -492,8 +512,9 @@ synced with upstream and all forks pin `braghettos/plumbing v1.7.6` (§ alignmen
 
 ## 11. Open questions
 
-- **Snowplow service-mode entrypoint** (§4.3): shape of the own-SA resolve API + how
-  composition context is passed; and the **security bounding** of what it may resolve/reach.
+- **Snowplow service-mode entrypoint** (§4.3): the own-SA resolve API shape (context is
+  already handled — pass it via the resolver's existing `Extras` hook); and the **security
+  bounding** of what it may resolve/reach under snowplow's SA.
 - **Multi-cluster `apiRef` placement** (§4.3): resolve on management cluster vs. project a
   resolver + RESTAction/Secrets into the target.
 - **Shared-types home** (§9): lift snowplow's types + resolver into `plumbing` vs. duplicate;
