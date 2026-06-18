@@ -601,10 +601,12 @@ Two rules and one runtime caveat govern this:
   `int64`, `float64`, `bool`, `nil`, `json.Number` and **panics** on anything else — and
   gojq emits plain `int` for integers (and other non-JSON-native Go types). So the engine
   **must normalize** every jq result (recursively: `int`→`int64`, ensure containers are
-  `map[string]interface{}`/`[]interface{}`) before writing. A JSON round-trip does this;
-  integral values should be re-narrowed to `int64` to avoid the `float64`-for-integer CRD
-  warnings RDC's #42 hit. This normalization is the engine's job (one more reason it is
-  shared, not per-provider).
+  `map[string]interface{}`/`[]interface{}`) before writing. **`braghettos/plumbing v1.7.6`
+  already carries this fix** in `jqutil` (commit `28c9297` "handle int64/int32 in jqutil
+  encoder (prevents gojq panic)"), and `jqutil.InferType` produces typed values — so the
+  engine inherits the normalization from `jqutil` rather than reimplementing it. (This fix
+  is **fork-only**, not yet upstreamed — see §9 on plumbing alignment.) This is one more
+  reason the engine is a thin adapter over shared `plumbing` code, not per-provider.
 
 ### 4.3 GVR sources: the composition itself, and its managed resources
 
@@ -887,11 +889,23 @@ All work targets the **`braghettos`** forks (origin), with `krateoplatformops` k
 | plumbing (`jqutil`; candidate home for the shared `resourcesRefs`/`*DataTemplate` types + resolver, §3.2) | `braghettos/plumbing` | already core-provider's `replace` target |
 | snowplow (frontend BFF — source of the `resourcesRefs`/`widgetDataTemplate` convention + resolver to share, §3.2) | `braghettos/snowplow` (fork to create) | not yet a fork; only needed if we lift its types/resolver into `plumbing` |
 
+> **Plumbing alignment (audited 2026-06-18).** All forks now source plumbing from
+> `braghettos/plumbing` and are pinned to the **same `v1.7.6`** (`replace` directives;
+> core-provider, CDC, unstructured-runtime, braghettos-oasgen-provider — all build green;
+> RDC has no plumbing dep). The fork's shared tags (`v1.7.0/v1.7.3/v1.8.1`) are
+> **byte-identical to upstream**; `v1.7.6` is **fork-only**, carrying two unupstreamed
+> fixes — the `jqutil` int/int32 gojq-panic fix (`28c9297`, directly relevant to §4.2) and
+> a crdgen array-default fix (`9e1af5d`). However the fork is **diverged from upstream: 3
+> ahead, 19 behind** (upstream is already at `v1.9.0`). **Action item:** merge `upstream`
+> into `braghettos/plumbing` to catch up (preserving the 2 fork fixes; ideally upstream
+> them), then re-verify the dependent forks build — the 19 upstream commits may move
+> plumbing APIs.
+
 go.mod consequences:
 
 - **Shared types/resolver (§3.2)**: lifting snowplow's convention into `plumbing` lets
   snowplow, core-provider, CDC and RDC all depend on one implementation. Reconcile the
-  version skew (snowplow `plumbing v0.6.2` vs core-provider `braghettos v1.7.x`).
+  version skew (snowplow `plumbing v0.6.2` vs the forks' `braghettos v1.7.6`).
 - **`unstructured-runtime`**: `statusprojection` depends on `plumbing/jqutil` (jq,
   Proposal A) — so `unstructured-runtime` gains a `plumbing` dependency (pinned to the
   `braghettos` fork via `replace`). Under Proposal B it would instead pull `cel-go`. If
