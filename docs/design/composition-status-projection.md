@@ -26,10 +26,13 @@
    pruning); the CDC fills them each reconcile (worked end-to-end example in §4.1).
 3. Put the **generic projection engine in `unstructured-runtime`** (a new
    `pkg/tools/statusprojection` package). It takes a CR, one or more **named sources**
-   (the CR's own `spec`, and provider-supplied maps such as the Helm release metadata
-   or — in RDC — the API response), a list of mappings, and writes `status`. Both the
-   CDC and RDC consume it; `oasgen-provider`'s `additionalStatusFields` becomes the
-   "source = response" case of the same model.
+   (the CR's own `spec`; the Helm metadata; and — crucially — the **live managed
+   resources** the composition created, for extraction/aggregation; or, in RDC, the API
+   response), a list of mappings, and writes `status`. The engine is pure; the CDC does any
+   I/O (fetching managed objects) and passes them in. Both the CDC and RDC consume it;
+   `oasgen-provider`'s `additionalStatusFields` becomes the "source = response" case.
+   Objects, arrays and arrays-of-objects are all supported (§4.2); `managed`-derived values
+   and aggregations are §4.3.
    - **Transform language: two proposals documented — jq vs CEL (§3.1), with examples.**
      Recommendation is **jq** (`plumbing/jqutil`): already a Krateo dependency, platform
      convention, and native type preservation that subsumes RDC's in-flight #42 work.
@@ -149,9 +152,10 @@ checks can read them. The only knobs are the five hard-coded fields.
 
 - **G1.** A `CompositionDefinition` can declare extra status fields on the Composition
   CRD it generates.
-- **G2.** Those fields are populated each reconcile by **projecting/transforming the
-  instance's inputs** (its `spec`, i.e. the chart values) — and, by extension, other
-  named sources (Helm release metadata; in RDC, the API response).
+- **G2.** Those fields are populated each reconcile by **projecting/transforming** from
+  named sources: the instance's `spec` (chart values) and Helm metadata (Phase 1), and the
+  **live managed resources the composition created** — including **aggregations across
+  them** (Phase 2, §4.3) — plus, in RDC, the API response.
 - **G3.** The runtime projection/transform engine is **shared** (lives in
   `unstructured-runtime`), so the CDC and RDC use one implementation and `oasgen`'s
   `additionalStatusFields` is re-expressed as one case of it.
@@ -163,8 +167,9 @@ checks can read them. The only knobs are the five hard-coded fields.
 - **N1.** kstatus-based readiness rollup of `managed[]` into `Ready` (Phase 2, §7).
 - **N2.** Helm release revision/state/deploy-time surfacing (Phase 2, §7).
 - **N3.** Changing the conversion/`vacuum` storage-version machinery.
-- **N4.** Arbitrary cross-resource lookups (reading other clusters' objects) as a
-  projection source.
+- **N4.** Reading the composition's **own** managed resources is in scope but deferred to
+  Phase 2 (§4.3/§7). Out of scope entirely: lookups of **unrelated** objects, or objects
+  in **other clusters**, as a projection source.
 
 ---
 
@@ -202,8 +207,11 @@ The provider decides **which sources exist** and **where the mappings come from*
 
 | Provider | Sources it supplies | Mapping origin |
 |---|---|---|
-| core-provider / CDC | `spec` (the CR's own spec = chart values), `helm` (release metadata: revision, name, version, status) | `CompositionDefinition.spec.additionalStatusFields` |
+| core-provider / CDC | `spec` (the CR's own spec = chart values), `helm` (release metadata), `managed` (the **array of live managed resources** the chart created — for extraction/aggregation, §4.3; Phase 2) | `CompositionDefinition.spec.additionalStatusFields` |
 | oasgen / RDC | `response` (API GET/FINDBY body), `spec` | `RestDefinition.spec.resource.additionalStatusFields` (+ `identifiers`) |
+
+The `managed` source is the key one for Compositions: status values such as an allocated
+LB IP or a rolled-up `readyReplicas` live on the rendered objects, not on the spec (§4.3).
 
 The engine is identical; only the source maps and the mapping list differ. This is the
 core of G3: **`additionalStatusFields` (response→status) and our new spec→status
@@ -295,8 +303,23 @@ type StatusFieldMapping struct {
     // Type optionally pins the JSON-schema type of the generated status property
     // ("string"|"integer"|"number"|"boolean"|"object"|"array"). When omitted the type is
     // inferred from the chart values schema for simple-path expressions (string fallback).
+    // For scalars only — for objects/arrays use Schema or PreserveUnknownFields (§4.2).
     // +optional
     Type string `json:"type,omitempty"`
+
+    // Schema optionally supplies the full JSON-schema for a COMPLEX output (object, array,
+    // array of objects, …) that the expression constructs. Required to get structural
+    // typing/validation when the shape can't be inferred from a simple path (§4.2/§5).
+    // +optional
+    Schema *apiextensionsv1.JSONSchemaProps `json:"schema,omitempty"`
+
+    // PreserveUnknownFields generates the status node with
+    // x-kubernetes-preserve-unknown-fields: true, so the apiserver retains an arbitrary
+    // (possibly dynamic) structure without pruning — the escape hatch when neither a
+    // simple-path inference nor an explicit Schema is practical. Loses per-field
+    // typing/validation. Mutually exclusive with Type/Schema. (§4.2)
+    // +optional
+    PreserveUnknownFields bool `json:"preserveUnknownFields,omitempty"`
 }
 ```
 
@@ -389,6 +412,113 @@ status:
   conditions: [ { type: Ready, status: "True", … }, { type: Synced, … } ]
 ```
 
+### 4.2 Complex status structures (objects, arrays, arrays of objects)
+
+A status field is not limited to a scalar. jq constructs arbitrary JSON, and the engine
+writes the **whole constructed value** at `to`, so objects/arrays/arrays-of-objects/nested
+arrays all work in **one mapping**:
+
+```yaml
+additionalStatusFields:
+  # object value
+  - to: network
+    source: spec
+    expression: '{ host: .service.host, port: .service.port }'
+    schema:                              # explicit shape (§5)
+      type: object
+      properties: { host: {type: string}, port: {type: integer} }
+
+  # array of objects
+  - to: endpoints
+    source: spec
+    expression: '[ .ingress[] | { host: .host, tls: (.tls // false) } ]'
+    schema:
+      type: array
+      items:
+        type: object
+        properties: { host: {type: string}, tls: {type: boolean} }
+
+  # dynamic / unknown shape — escape hatch, no per-field typing
+  - to: raw
+    source: spec
+    expression: '.somethingDynamic'
+    preserveUnknownFields: true
+```
+
+Two rules and one runtime caveat govern this:
+
+- **`to` addresses object locations only.** Dotted `to` builds nested *objects*
+  (`a.b.c`); you never index arrays in `to`. To produce an array at `status.endpoints`,
+  the **expression yields the array** (`[ … ]`). This keeps writes unambiguous.
+- **Single value per mapping.** A jq program can emit a *stream*; a mapping must resolve to
+  one value. Wrap multi-output in `[ … ]` to make it an explicit array; a bare stream is a
+  validation error (§5).
+- **Normalization is mandatory (runtime).** `unstructured.SetNestedField` →
+  `DeepCopyJSONValue` accepts only `map[string]interface{}`, `[]interface{}`, `string`,
+  `int64`, `float64`, `bool`, `nil`, `json.Number` and **panics** on anything else — and
+  gojq emits plain `int` for integers (and other non-JSON-native Go types). So the engine
+  **must normalize** every jq result (recursively: `int`→`int64`, ensure containers are
+  `map[string]interface{}`/`[]interface{}`) before writing. A JSON round-trip does this;
+  integral values should be re-narrowed to `int64` to avoid the `float64`-for-integer CRD
+  warnings RDC's #42 hit. This normalization is the engine's job (one more reason it is
+  shared, not per-provider).
+
+### 4.3 Sourcing from managed resources (and aggregating across them)
+
+The most valuable status values usually do **not** come from the Composition's own spec —
+they come from the **live managed resources the chart created** (the GVRs tracked in
+`status.managed[]`): a `Service`'s allocated LB IP, a `Deployment`'s `readyReplicas`, a
+generated `Secret`'s field — or a **sum/rollup across several** of them. This is a
+first-class source.
+
+Add a `managed` source whose document is the **array of fetched live managed objects**
+(each the full object, so `kind`/`metadata`/`spec`/`status` are all reachable). jq then
+selects one or aggregates many — exactly its strength:
+
+```yaml
+additionalStatusFields:
+  # single resource: a Service's load-balancer IP
+  - to: endpoint
+    source: managed
+    type: string
+    expression: '[ .[] | select(.kind=="Service" and .metadata.name=="web")
+                       | .status.loadBalancer.ingress[0].ip ] | first'
+
+  # SUM across resources: total ready replicas over all Deployments
+  - to: readyReplicas
+    source: managed
+    type: integer
+    expression: '[ .[] | select(.kind=="Deployment") | .status.readyReplicas // 0 ] | add'
+
+  # CONCAT across resources: every ingress host the composition exposes
+  - to: hosts
+    source: managed
+    schema: { type: array, items: { type: string } }
+    expression: '[ .[] | select(.kind=="Ingress") | .spec.rules[].host ] | unique'
+```
+
+**This stays compatible with the "pure engine" rule by moving the I/O to the CDC.** The
+engine never reads the cluster; the **CDC fetches the managed objects** (it already holds
+`status.managed[]`, and Phase 2's readiness rollup needs the very same fetch — §7) and
+passes them in:
+
+```go
+managed := h.fetchManaged(ctx, mg)            // []any of live unstructured objects
+sources := map[string]any{"helm": …, "managed": managed}
+_ = statusprojection.Project(mg, sources, mappings)
+```
+
+**Cost — this is the real trade-off.** `spec`/`helm` projection is free (no extra reads).
+`managed` projection requires **fetching the managed set every reconcile**, and to keep
+those values *fresh* the CDC must **watch** the managed objects (otherwise a Service IP
+that arrives later only shows up on the next periodic resync). That is precisely the
+watch-cost called out in #14's open questions and needed for readiness rollup. So:
+
+- **Phase 1** ships `spec` + `helm` sources only — cheap, no new watches.
+- The **`managed` source ships with Phase 2** (§7/§8), sharing the fetch+watch machinery
+  with readiness rollup. The API (`source: managed`) is defined now so it is forward
+  compatible, but is rejected by validation until that phase lands.
+
 ---
 
 ## 5. Schema generation (provider-local, core-provider)
@@ -399,15 +529,25 @@ core-provider therefore extends its status schema from the declarations:
 
 - Start from the static `status.schema.json` (unchanged baseline).
 - For each `StatusFieldMapping`, add a property at `to` (building intermediate objects for
-  dotted paths) with type:
-  - `Type` if pinned; else
-  - for a **simple-path** expression (a bare `.a.b.c`), inferred by resolving that path
-    against the **chart's `values.schema.json`** (the same JSON-schema we already parse to
-    build the spec) when `source: spec` — mirroring how `oas2jsonschema.composeStatusSchema`
-    resolves against the response schema; else
-  - `string` fallback (jq's output type is not statically known for non-trivial programs —
-    pin `Type` when the field must be numeric/bool/object; this is jq's one ergonomic cost
-    vs. CEL, see §3.1).
+  dotted paths). Its sub-schema is chosen, **in precedence order**:
+  1. **`Schema`** if given — used verbatim for complex shapes (object / array /
+     array-of-objects, §4.2). The author owns the structure.
+  2. **`PreserveUnknownFields`** — emit the node as `{ x-kubernetes-preserve-unknown-fields:
+     true }` so the apiserver retains arbitrary structure without pruning (no per-field
+     typing). The escape hatch for dynamic shapes.
+  3. **`Type`** if pinned — a scalar type (and, for `array`/`object` without `Schema`, must
+     fall back to preserve-unknown since a structural schema needs `items`/`properties`).
+  4. **simple-path inference** — for a bare `.a.b.c` against `source: spec`, copy that
+     field's **full sub-schema** (including nested object/array structure) from the chart's
+     `values.schema.json` — so "copy this whole object/array from spec→status" is typed for
+     free, mirroring `oas2jsonschema.composeStatusSchema`.
+  5. **`string` fallback** — jq's output type is not statically known for non-trivial
+     programs; pin `Type`/`Schema` when the field must be non-string. (jq's one ergonomic
+     cost vs. CEL, §3.1.)
+- **Structural-schema constraints (must enforce).** CRD status schemas are *structural*:
+  every `object` needs `properties` or `additionalProperties` or preserve-unknown; every
+  `array` needs `items`; no bare untyped nodes. The generator rejects a `Schema` that
+  violates this, and never emits an untyped object/array (falls to preserve-unknown).
 - Feed the merged status schema into the existing `crdgen.Generate(Options{StatusSchema:…})`
   path (`generation.go`), then the existing per-version `UpdateStatus` loop stamps it onto
   all served versions — so this composes with the multi-version / `vacuum` machinery
@@ -439,11 +579,14 @@ type Mapping struct {
     To, Source, Expression string
 }
 
-// Project evaluates each mapping's Expression against its Source and writes the (typed)
-// result into cr's .status at To. `sources` maps a source name ("spec","helm","response",
-// …) to a document; the CR's own spec is injected as source "spec" automatically.
-// Expressions are jq programs run via plumbing/jqutil (gojq); compiled programs are
-// cached keyed by expression so each is parsed once across reconciles.
+// Project evaluates each mapping's Expression against its Source and writes the (typed,
+// normalized) result into cr's .status at To. `sources` maps a source name
+// ("spec","helm","managed","response",…) to a document; the CR's own spec is injected as
+// source "spec" automatically. Source documents that require I/O (e.g. "managed", the live
+// managed objects) are fetched by the CALLER and passed in — Project performs no client
+// calls. Expressions are jq programs run via plumbing/jqutil (gojq); compiled programs are
+// cached keyed by expression so each is parsed once across reconciles. Each result is
+// normalized to DeepCopyJSONValue-safe types (int->int64, etc.) before writing (§4.2).
 func Project(cr *unstructured.Unstructured, sources map[string]any, mappings []Mapping) error
 
 // SetObservedGeneration writes status.observedGeneration = metadata.generation.
@@ -462,7 +605,12 @@ Properties (note how each beats the RDC `populateStatusFields` limits from §1.4
   generated schema's types. This makes #42's hand-rolled int/float/bool conversion
   **unnecessary** (type-safety is intrinsic to jq), rather than something to port.
 - **Transform built in** — the `Expression` *is* the transform; a bare path is the
-  trivial copy. Beats copy-only.
+  trivial copy; it can construct **objects/arrays/arrays-of-objects** and **aggregate**
+  across a source array (`add`, `unique`, `group_by`…) — see §4.2 / §4.3. Beats copy-only.
+- **Output normalization** — every jq result is normalized to DeepCopyJSONValue-safe types
+  (`int`→`int64`, JSON-native containers; integral floats re-narrowed) before
+  `SetNestedField`, so complex values write without panics and integers stay integers
+  (§4.2). This subsumes RDC #42's type work.
 - Errors are per-mapping and aggregated; a bad mapping degrades that field (and raises a
   `Synced=False/ReconcileError` reason) rather than failing the whole reconcile.
 
@@ -508,17 +656,22 @@ Recommendation: **(a)**, extending the existing CDC ConfigMap template.
 
 ---
 
-## 7. Deferred: readiness rollup & Helm metadata (Phase 2 sketch)
+## 7. Deferred: managed-source projection, readiness rollup & Helm metadata (Phase 2)
 
-Not built now; recorded so the API above stays forward-compatible.
+Not built in Phase 1; recorded so the API above stays forward-compatible. These three
+share one piece of machinery — **fetching (and watching) the `status.managed[]` set** —
+which is why they land together.
 
-- **Readiness rollup.** Iterate `status.managed[]`, fetch each via the dynamic client,
-  compute per-object status with **kstatus** (`sigs.k8s.io/cli-utils/pkg/kstatus`), and
-  roll up into `Ready` (`Current`⇒True; any `Failed`⇒False/reason; else
-  `InProgress`). This needs the CDC to **watch** managed objects (cost noted in #14's open
-  questions) and a generic helper — a natural second `unstructured-runtime` addition
-  (`pkg/tools/readiness`) reusable by RDC. An extensibility hook handles kinds kstatus
-  can't assess.
+- **`managed` source projection (§4.3).** Extract/aggregate status values from the live
+  managed resources. Needs the managed-object fetch (and a watch, for freshness). The CDC
+  fetches and passes them to `Project` as `sources["managed"]`; the engine stays pure.
+- **Readiness rollup.** Iterate `status.managed[]`, fetch each via the dynamic client (the
+  *same fetch* as above), compute per-object status with **kstatus**
+  (`sigs.k8s.io/cli-utils/pkg/kstatus`), and roll up into `Ready` (`Current`⇒True; any
+  `Failed`⇒False/reason; else `InProgress`). Needs the CDC to **watch** managed objects
+  (cost noted in #14's open questions) and a generic helper — a natural second
+  `unstructured-runtime` addition (`pkg/tools/readiness`) reusable by RDC. An extensibility
+  hook handles kinds kstatus can't assess.
 - **Helm metadata.** Surface `release.revision/name/state/lastDeployed` — already
   available from the Helm release object the CDC holds; can ship as **baseline status
   fields** (extend `status.schema.json`) independently of projection, or be reached via
@@ -532,11 +685,14 @@ Not built now; recorded so the API above stays forward-compatible.
 1. **Phase 0 — shared engine.** `pkg/tools/statusprojection` (+ `SetObservedGeneration`)
    in `braghettos/unstructured-runtime`, with unit tests; tag a release.
 2. **Phase 1a — core-provider API + schema.** Add `additionalStatusFields` to
-   `CompositionDefinition`; merge declared properties into the generated status schema;
-   validate declarations on reconcile; pass mappings to the CDC (ConfigMap route).
-3. **Phase 1b — CDC populate.** Bump CDC's `unstructured-runtime` to the tag carrying
-   `statusprojection` (routine, already on `v1.1.0`); call `Project` +
-   `SetObservedGeneration`; e2e on a chart that declares a couple of fields + a transform.
+   `CompositionDefinition` (incl. `Schema`/`PreserveUnknownFields` for complex shapes,
+   §4.2); merge declared properties into the generated status schema; validate declarations
+   on reconcile (reject `source: managed` until Phase 2); pass mappings to the CDC
+   (ConfigMap route).
+3. **Phase 1b — CDC populate (`spec` + `helm`).** Bump CDC's `unstructured-runtime` to the
+   tag carrying `statusprojection` (routine, already on `v1.1.0`); call `Project` +
+   `SetObservedGeneration`; e2e on a chart that declares scalar, derived, and
+   object/array fields. No new watches.
 4. **Phase 1c — RDC convergence.** Replace RDC's `populateStatusFields` with `Project`
    (`sources["response"] = body`). **Coordinate with the in-flight
    `braghettos/rest-dynamic-controller` branches #40 and #42** (§1.4): with jq the engine
@@ -544,9 +700,13 @@ Not built now; recorded so the API above stays forward-compatible.
    ported. If #40/#42 merge first, Phase 1c becomes a refactor that deletes
    `populateStatusFields` in favour of the shared call. Decide ordering with whoever owns
    #40/#42.
-5. **Phase 2 — readiness rollup + Helm metadata** (§7), separately.
+5. **Phase 2 — `managed` source + readiness rollup + Helm metadata** (§7): add the
+   managed-object fetch/watch once, then light up `source: managed` projection (§4.3) and
+   the kstatus `Ready` rollup on top of it.
 
-Each phase is independently shippable; Phase 0+1 deliver the headline capability.
+Each phase is independently shippable; Phase 0+1 deliver the headline capability for
+`spec`/`helm`-derived status. Phase 2 unlocks the managed-resource-derived values that, as
+noted in §4.3, are often the most useful — at the cost of watching the managed set.
 
 ---
 
@@ -606,7 +766,12 @@ go.mod consequences:
   evaluator interface so `unstructured-runtime` stays dialect-agnostic and the provider
   wires jq in (§9)? Lean injected-evaluator.
 - **Source surface**: which named sources to expose and whether `Expression` may read the
-  existing `status` (for accumulation). Lean minimal first (`spec`, `helm`/`response`).
+  existing `status` (for accumulation). Lean minimal first (`spec`, `helm`/`response`),
+  then `managed` in Phase 2.
+- **Managed-resource addressing & freshness (§4.3)**: how to identify a specific managed
+  object when chart-rendered names are release-prefixed/templated (select by `kind` +
+  labels rather than hard-coded `name`?); and the watch strategy + resync interval to keep
+  `managed`-derived values fresh without excessive reads. Shared with Phase 2 readiness.
 - **Schema-helper home**: extract into `plumbing` (shared) vs. duplicate per provider
   initially.
 - **RDC scope & sequencing**: branches #40 (populate `additionalStatusFields`) and #42
