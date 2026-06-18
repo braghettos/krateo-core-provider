@@ -2,8 +2,10 @@
 
 > Status: **Draft for discussion** · Author: design exploration · Date: 2026-06-18
 >
-> Tracks: [krateo-core-provider#14](https://github.com/braghettos/krateo-core-provider/issues/14)
-> — "Add status subresource to generated Composition CRD (health/readiness propagation)".
+> Supersedes the retired issue *"Add status subresource to generated Composition CRD
+> (health/readiness propagation)"*, which was deleted as mis-framed: the generated CRD
+> already has a status subresource (§1.1), and the real need is **declarative status
+> projection**, not a fixed health schema — readiness rollup is just one computed case of it.
 >
 > Goal: let a `CompositionDefinition` declare **additional status fields** on the
 > generated `Composition` CRD, and have the controller **populate them at reconcile
@@ -80,7 +82,7 @@ already ships a status schema and the CDC already writes to it.
 - conditions `Ready` / `Synced` via `unstructured-runtime`'s `condition` package and
   `tools.UpdateStatus`.
 
-Gaps vs. issue #14: **no `observedGeneration`**; **no Helm revision/state/deploy-time**;
+Gaps vs. the original health/readiness ask: **no `observedGeneration`**; **no Helm revision/state/deploy-time**;
 **no real readiness rollup** (`condition.Available()` is set unconditionally on reconcile
 success, not derived from the health of `managed[]`).
 
@@ -165,7 +167,7 @@ checks can read them. The only knobs are the five hard-coded fields.
 - **G3.** The runtime projection/transform engine is **shared** (lives in
   `unstructured-runtime`), so the CDC and RDC use one implementation and `oasgen`'s
   `additionalStatusFields` is re-expressed as one case of it.
-- **G4.** Populate `status.observedGeneration` (cheap, asked for by #14).
+- **G4.** Populate `status.observedGeneration` (cheap; part of the original health/readiness ask).
 - **G5.** Backward compatible: no declarations ⇒ status identical to today.
 
 **Non-goals (this phase).**
@@ -674,7 +676,7 @@ _ = statusprojection.Project(mg, resolved, mappings)  // "self"/"spec"/"status" 
 **Cost — the real trade-off.** `self`/`spec`/`status`/`helm` are free (already in hand).
 A GVR source requires **fetching the referenced object(s) every reconcile**, and to keep
 values *fresh* the CDC must **watch** them (otherwise a late-arriving LB IP only appears on
-the next resync) — precisely the watch-cost in #14's open questions and shared with
+the next resync) — precisely the watch-cost flagged from the start and shared with
 readiness rollup. So:
 
 - **Phase 1** ships the in-hand sources (`self`/`spec`/`status`/`helm`) only — cheap, no
@@ -926,7 +928,7 @@ which is why they land together.
   *same fetch* as above), compute per-object status with **kstatus**
   (`sigs.k8s.io/cli-utils/pkg/kstatus`), and roll up into `Ready` (`Current`⇒True; any
   `Failed`⇒False/reason; else `InProgress`). Needs the CDC to **watch** managed objects
-  (cost noted in #14's open questions) and a generic helper — a natural second
+  (a known operational cost) and a generic helper — a natural second
   `unstructured-runtime` addition (`pkg/tools/readiness`) reusable by RDC. An extensibility
   hook handles kinds kstatus can't assess.
 - **Helm metadata.** Surface `release.revision/name/state/lastDeployed` — already
@@ -1067,6 +1069,6 @@ go.mod consequences:
   (i) let them merge and then refactor RDC onto the shared engine, or (ii) hold them and
   land the shared engine first? Either way #42's type-conversion logic should end up *in*
   the shared engine, not duplicated.
-- **Versioning interaction** (#14): how projected fields behave across the full/parallel/
+- **Versioning interaction**: how projected fields behave across the full/parallel/
   selective migration patterns — mappings are per-`CompositionDefinition`-version, so they
   ride the existing per-version status stamping, but worth an explicit test.
