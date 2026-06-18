@@ -36,7 +36,9 @@
    I/O (fetching managed objects) and passes them in. Both the CDC and RDC consume it;
    `oasgen-provider`'s `additionalStatusFields` becomes the "source = response" case.
    Objects, arrays and arrays-of-objects are all supported (§4.2); `managed`-derived values
-   and aggregations are §4.3.
+   and aggregations are §4.3; and — fully snowplow-aligned — **external APIs via
+   `apiRef`/RESTAction** are §4.4 (reusing snowplow's executor). One keyed jq root covers
+   `self`/`helm`, in-cluster GVRs, and external APIs alike.
    - **Transform language: two proposals documented — jq vs CEL (§3.1), with examples.**
      Recommendation is **jq** (`plumbing/jqutil`): already a Krateo dependency, platform
      convention, and native type preservation that subsumes RDC's in-flight #42 work.
@@ -242,11 +244,12 @@ source.
 | `self` (and `spec`/`status` sugar) | the Composition CR the CDC is already reconciling | none | 1 |
 | `helm` | Helm release metadata the CDC holds (the one non-GVR, synthetic source) | none | 1 |
 | **declared GVR source** (a named object or a selector set) | live managed object(s) the composition created | fetch + watch | 2 (§4.3/§7) |
+| **`apiRef` → RESTAction** | external REST API response(s), keyed by call (snowplow `apiRef`) | execute REST + poll | 2/3 (§4.4) |
 | `response` (RDC only) | the API GET/FINDBY body RDC already has | none | — |
 
 The engine is identical across providers; only which sources are resolved differs. This is
-the core of G3: response→status, spec→status, and managed-object→status are all the **same
-operation over a different source object**.
+the core of G3: response→status, spec→status, managed-object→status, and external-API→status
+are all the **same operation over a different source object**.
 
 ### 3.1 Transform language — two proposals: jq vs CEL
 
@@ -681,6 +684,57 @@ readiness rollup. So:
   `source: <gvr>` are defined now (forward compatible) but rejected by validation until
   that phase lands.
 
+### 4.4 External sources via `apiRef` → RESTAction
+
+The snowplow convention (§3.2) has a second source kind we should carry through to
+compositions: **`apiRef`**, a reference to a **`RESTAction`** CR
+(`templates.krateo.io`, `apis/templates/v1/restactions.go`) describing named REST calls.
+This lets a Composition surface status from an **external system** — a provisioning/health
+endpoint, a cloud API, a billing/quota service — not just from its own spec or its
+in-cluster managed resources.
+
+It is the exact mechanism snowplow already uses: `apiref.Resolve`
+(`internal/resolvers/widgets/apiref/resolve.go`) fetches the referenced `RESTAction`,
+executes its calls, and returns a `map[string]any` of responses **keyed by call name**.
+Those keys join the same combined jq root, so a `statusDataTemplate` reads them like any
+other source:
+
+```yaml
+spec:
+  apiRef:                                  # snowplow shape: name/namespace of a RESTAction
+    name: backend-health
+    namespace: demo-system
+  statusDataTemplate:
+    - forPath: backendReady                 # status.backendReady, from an external API
+      expression: ${ .api.health.status == "UP" }
+      type: boolean
+    - forPath: externalId
+      expression: ${ .api.provision.id }
+```
+
+(`.api` is the keyed apiRef root; `.api.health`, `.api.provision` are individual RESTAction
+calls.) The same source could equally feed a `resourcesRefs` extraction — they coexist in
+one root, exactly as in a snowplow widget.
+
+**Design implications (heavier than the other sources, hence later phase):**
+
+- **Executor.** Something must *run* the RESTAction each reconcile. The clean move is to
+  **reuse snowplow's `apiref` resolver / RESTAction executor** (another shared-code lever,
+  §3.2/§9) rather than build a second one — the CDC calls it and passes the keyed responses
+  into `Project`. The engine stays pure (no I/O).
+- **Secrets & RBAC.** RESTActions reference credentials (Secrets) for the target API. The
+  CDC needs read access to those Secrets and the `RESTAction` CR — scope via the same
+  reference pattern used elsewhere; no plaintext in the Composition or logs.
+- **Cost & freshness.** External calls every reconcile + a poll interval to refresh — the
+  heaviest source. Treat external failures as a degraded field (per-mapping error →
+  `Synced=False/ReconcileError`), never a hard reconcile failure.
+- **Phasing.** Ships **after** the managed-resource source — Phase 2/3 (§8). The API
+  (`apiRef`) is defined now for forward-compatibility but validation-rejected until then.
+
+This makes the source model complete and fully snowplow-aligned: **`self`/`helm`**
+(in-hand), **`resourcesRefs`** (in-cluster GVRs), and **`apiRef`/RESTAction** (external
+APIs) — one keyed jq root, one `*DataTemplate`, one engine.
+
 ---
 
 ## 5. Schema generation (provider-local, core-provider)
@@ -867,10 +921,14 @@ which is why they land together.
 5. **Phase 2 — `managed` source + readiness rollup + Helm metadata** (§7): add the
    managed-object fetch/watch once, then light up `source: managed` projection (§4.3) and
    the kstatus `Ready` rollup on top of it.
+6. **Phase 3 — external sources via `apiRef`/RESTAction** (§4.4): reuse snowplow's `apiref`
+   resolver/executor in the CDC, feed keyed responses into `Project`; secrets/RBAC + poll
+   freshness. Heaviest source, lands last.
 
 Each phase is independently shippable; Phase 0+1 deliver the headline capability for
 `spec`/`helm`-derived status. Phase 2 unlocks the managed-resource-derived values that, as
-noted in §4.3, are often the most useful — at the cost of watching the managed set.
+noted in §4.3, are often the most useful — at the cost of watching the managed set. Phase 3
+extends the same model to external systems with no new concepts — just another keyed source.
 
 ---
 
