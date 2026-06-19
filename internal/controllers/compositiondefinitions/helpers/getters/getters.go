@@ -33,18 +33,40 @@ const (
 var retryWait = retry.Wait
 
 func GetCompositions(ctx context.Context, dyn dynamic.Interface, gvr schema.GroupVersionResource) (*unstructured.UnstructuredList, error) {
+	return GetCompositionsByVersionLabel(ctx, dyn, gvr, gvr.Version)
+}
+
+// DefinitionRef identifies the CompositionDefinition that owns a set of composition instances.
+// An empty DefinitionRef means "do not scope by owner" (match instances of any definition).
+type DefinitionRef struct {
+	Name      string
+	Namespace string
+}
+
+// GetCompositionsByVersionLabel lists compositions served at gvr whose
+// krateo.io/composition-version label equals versionLabel, across ALL owning definitions. The
+// LABEL (not the served apiVersion) identifies the owning per-version controller, because the
+// vacuum storage version erases the apiVersion; so listing through any served endpoint with a
+// given label finds those instances regardless of which version they were written through.
+func GetCompositionsByVersionLabel(ctx context.Context, dyn dynamic.Interface, gvr schema.GroupVersionResource, versionLabel string) (*unstructured.UnstructuredList, error) {
+	return GetOwnedCompositionsByVersionLabel(ctx, dyn, gvr, versionLabel, DefinitionRef{})
+}
+
+// GetOwnedCompositionsByVersionLabel lists compositions served at gvr that carry versionLabel
+// in composition-version AND (when owner is non-empty) are owned by that CompositionDefinition.
+// Owner scoping matters because one CRD/Kind can be shared by multiple CompositionDefinitions at
+// different versions; migration must only ever touch its own definition's instances.
+func GetOwnedCompositionsByVersionLabel(ctx context.Context, dyn dynamic.Interface, gvr schema.GroupVersionResource, versionLabel string, owner DefinitionRef) (*unstructured.UnstructuredList, error) {
 	log := contexttools.LoggerFromCtx(ctx, logging.NewNopLogger())
-	// Create a label requirement for the composition version
-	labelreq, err := labels.NewRequirement(deploy.CompositionVersionLabel, selection.Equals, []string{gvr.Version})
+
+	selector, err := compositionSelector(versionLabel, owner)
 	if err != nil {
-		log.Debug("Error creating label requirement", "error", err)
-		return nil, fmt.Errorf("error creating label requirement: %w", err)
+		log.Debug("Error creating label selector", "error", err)
+		return nil, fmt.Errorf("error creating label selector: %w", err)
 	}
-	selector := labels.NewSelector()
-	selector = selector.Add(*labelreq)
 
 	ul, err := dyn.Resource(gvr).Namespace(metav1.NamespaceAll).List(ctx, metav1.ListOptions{
-		LabelSelector: selector.String(),
+		LabelSelector: selector,
 	})
 	if err != nil {
 		log.Debug("Error listing compositions", "error", err)
@@ -54,23 +76,56 @@ func GetCompositions(ctx context.Context, dyn dynamic.Interface, gvr schema.Grou
 	return ul, nil
 }
 
-// updateCompositionsVersion updates the version label of all compositions in a namespace
-// that match the specified GroupVersionResource (GVR) and current version.
-func UpdateCompositionsVersion(ctx context.Context, dyn dynamic.Interface, gvr schema.GroupVersionResource, newVersion string) error {
+// compositionSelector builds the label selector for the composition-version label plus, when
+// owner is set, the composition-definition-name/-namespace ownership labels.
+func compositionSelector(versionLabel string, owner DefinitionRef) (string, error) {
+	selector := labels.NewSelector()
+	reqs := []struct{ key, val string }{{deploy.CompositionVersionLabel, versionLabel}}
+	if owner.Name != "" {
+		reqs = append(reqs, struct{ key, val string }{deploy.CompositionDefinitionNameLabel, owner.Name})
+	}
+	if owner.Namespace != "" {
+		reqs = append(reqs, struct{ key, val string }{deploy.CompositionDefinitionNamespaceLabel, owner.Namespace})
+	}
+	for _, r := range reqs {
+		req, err := labels.NewRequirement(r.key, selection.Equals, []string{r.val})
+		if err != nil {
+			return "", err
+		}
+		selector = selector.Add(*req)
+	}
+	return selector.String(), nil
+}
+
+// UpdateCompositionsVersion re-stamps every composition OWNED BY owner and currently labelled
+// fromVersion to toVersion, performing BOTH the list and the update THROUGH the gvr endpoint —
+// whose served version must be toVersion. This is deliberate: the in-apiserver
+// composition-version MutatingAdmissionPolicy stamps the label from the REQUEST's served
+// version, so a write through the old endpoint would re-stamp the old version and silently undo
+// the migration (leaving the composition selected by the retired old-version controller and
+// orphaned by the new one). Writing through the toVersion endpoint makes the policy agree with
+// the explicit relabel; the explicit label set in updateCompositionWithRetry also covers
+// clusters where the policy is not installed. Owner scoping ensures a version bump of one
+// definition never re-stamps another definition's instances that legitimately share the CRD.
+func UpdateCompositionsVersion(ctx context.Context, dyn dynamic.Interface, gvr schema.GroupVersionResource, fromVersion, toVersion string, owner DefinitionRef) error {
 	log := contexttools.LoggerFromCtx(ctx, logging.NewNopLogger())
 
-	ul, err := getCompositionsWithRetry(ctx, dyn, gvr, log)
+	if fromVersion == toVersion {
+		return nil
+	}
+
+	ul, err := getCompositionsWithRetry(ctx, dyn, gvr, fromVersion, owner, log)
 	if err != nil {
 		return fmt.Errorf("error getting compositions: %w", err)
 	}
 
 	if len(ul.Items) == 0 {
-		log.Debug("No compositions found for the specified GVR and version")
+		log.Debug("No compositions found for the specified GVR and version", "fromVersion", fromVersion, "owner", owner.Name)
 		return nil
 	}
 
 	for _, u := range ul.Items {
-		if err := updateCompositionWithRetry(ctx, dyn, gvr, u.GetNamespace(), u.GetName(), newVersion, log); err != nil {
+		if err := updateCompositionWithRetry(ctx, dyn, gvr, u.GetNamespace(), u.GetName(), toVersion, log); err != nil {
 			return err
 		}
 	}
@@ -78,7 +133,7 @@ func UpdateCompositionsVersion(ctx context.Context, dyn dynamic.Interface, gvr s
 	return nil
 }
 
-func getCompositionsWithRetry(ctx context.Context, dyn dynamic.Interface, gvr schema.GroupVersionResource, log logging.Logger) (*unstructured.UnstructuredList, error) {
+func getCompositionsWithRetry(ctx context.Context, dyn dynamic.Interface, gvr schema.GroupVersionResource, versionLabel string, owner DefinitionRef, log logging.Logger) (*unstructured.UnstructuredList, error) {
 	ul, err := retry.Do[*unstructured.UnstructuredList](ctx, retry.Config[*unstructured.UnstructuredList]{
 		Attempts:     compositionRetryAttempts,
 		InitialDelay: compositionRetryInitialDelay,
@@ -86,10 +141,10 @@ func getCompositionsWithRetry(ctx context.Context, dyn dynamic.Interface, gvr sc
 		Wait:         retryWait,
 		Retryable:    isRetryableCompositionError,
 		OnRetry: func(attempt int, nextDelay time.Duration, err error) {
-			log.Warn("Retrying composition list", "gvr", gvr.String(), "attempt", attempt, "next_delay", nextDelay, "error", err)
+			log.Warn("Retrying composition list", "gvr", gvr.String(), "versionLabel", versionLabel, "attempt", attempt, "next_delay", nextDelay, "error", err)
 		},
 	}, func(context.Context) (*unstructured.UnstructuredList, error) {
-		return GetCompositions(ctx, dyn, gvr)
+		return GetOwnedCompositionsByVersionLabel(ctx, dyn, gvr, versionLabel, owner)
 	})
 	if err != nil {
 		return nil, fmt.Errorf("error listing compositions after %d attempts: %w", compositionRetryAttempts, err)
