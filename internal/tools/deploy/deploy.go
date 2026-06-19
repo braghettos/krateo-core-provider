@@ -32,10 +32,17 @@ import (
 )
 
 const (
-	CompositionVersionLabel  = "krateo.io/composition-version"
-	CompositionStillExistErr = "compositions still exist"
-	controllerResourceSuffix = "-controller"
-	configmapResourceSuffix  = "-configmap"
+	CompositionVersionLabel = "krateo.io/composition-version"
+	// CompositionDefinitionNameLabel / CompositionDefinitionNamespaceLabel identify the
+	// CompositionDefinition that OWNS a composition instance. The composition-dynamic-controller
+	// stamps them at create time. They scope per-version migration to a single owning definition:
+	// one CRD/Kind can be shared by multiple CompositionDefinitions at different versions, so a
+	// version bump of one definition must not re-stamp another definition's instances.
+	CompositionDefinitionNameLabel      = "krateo.io/composition-definition-name"
+	CompositionDefinitionNamespaceLabel = "krateo.io/composition-definition-namespace"
+	CompositionStillExistErr            = "compositions still exist"
+	controllerResourceSuffix            = "-controller"
+	configmapResourceSuffix             = "-configmap"
 )
 
 var (

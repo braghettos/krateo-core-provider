@@ -40,7 +40,7 @@ func TestUpdateCompositionsVersion(t *testing.T) {
 		Resource: "fireworksapps",
 	}
 
-	err := UpdateCompositionsVersion(context.Background(), dyn, gvr, "v2")
+	err := UpdateCompositionsVersion(context.Background(), dyn, gvr, "v0-3-0", "v2", DefinitionRef{})
 	if err != nil {
 		t.Fatalf("updateCompositionsVersion failed: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestUpdateCompositionsVersionRetriesTransientListError(t *testing.T) {
 		Resource: "fireworksapps",
 	}
 
-	err := UpdateCompositionsVersion(context.Background(), dyn, gvr, "v2")
+	err := UpdateCompositionsVersion(context.Background(), dyn, gvr, "v0-3-0", "v2", DefinitionRef{})
 	if err != nil {
 		t.Fatalf("updateCompositionsVersion failed: %v", err)
 	}
@@ -135,7 +135,7 @@ func TestUpdateCompositionsVersionRetriesTransientUpdateError(t *testing.T) {
 		Resource: "fireworksapps",
 	}
 
-	err := UpdateCompositionsVersion(context.Background(), dyn, gvr, "v2")
+	err := UpdateCompositionsVersion(context.Background(), dyn, gvr, "v0-3-0", "v2", DefinitionRef{})
 	if err != nil {
 		t.Fatalf("updateCompositionsVersion failed: %v", err)
 	}
@@ -178,7 +178,7 @@ func TestUpdateCompositionsVersionRetriesUnknownUpdateError(t *testing.T) {
 		return false, nil, nil
 	})
 
-	err := UpdateCompositionsVersion(context.Background(), dyn, testCompositionGVR(), "v2")
+	err := UpdateCompositionsVersion(context.Background(), dyn, testCompositionGVR(), "v0-3-0", "v2", DefinitionRef{})
 	if err != nil {
 		t.Fatalf("updateCompositionsVersion failed: %v", err)
 	}
@@ -210,7 +210,7 @@ func TestUpdateCompositionsVersionSkipsUpdateWhenAlreadyOnTargetVersion(t *testi
 		Resource: "fireworksapps",
 	}
 
-	err := UpdateCompositionsVersion(context.Background(), dyn, gvr, "v2")
+	err := UpdateCompositionsVersion(context.Background(), dyn, gvr, "v0-3-0", "v2", DefinitionRef{})
 	if err != nil {
 		t.Fatalf("updateCompositionsVersion failed: %v", err)
 	}
@@ -253,7 +253,7 @@ func TestUpdateCompositionsVersionRecoversWhenFirstWriteSucceedsButReturnsTransi
 		return true, nil, fmt.Errorf("storage is (re)initializing")
 	})
 
-	err := UpdateCompositionsVersion(context.Background(), dyn, testCompositionGVR(), "v2")
+	err := UpdateCompositionsVersion(context.Background(), dyn, testCompositionGVR(), "v0-3-0", "v2", DefinitionRef{})
 	if err != nil {
 		t.Fatalf("updateCompositionsVersion failed: %v", err)
 	}
@@ -303,7 +303,7 @@ func TestUpdateCompositionsVersionRetriesConflictsWithFreshReads(t *testing.T) {
 		return false, nil, nil
 	})
 
-	err := UpdateCompositionsVersion(context.Background(), dyn, testCompositionGVR(), "v2")
+	err := UpdateCompositionsVersion(context.Background(), dyn, testCompositionGVR(), "v0-3-0", "v2", DefinitionRef{})
 	if err != nil {
 		t.Fatalf("updateCompositionsVersion failed: %v", err)
 	}
@@ -337,7 +337,7 @@ func TestUpdateCompositionsVersionSkipsCompositionDeletedAfterListing(t *testing
 		return false, nil, nil
 	})
 
-	err := UpdateCompositionsVersion(context.Background(), dyn, testCompositionGVR(), "v2")
+	err := UpdateCompositionsVersion(context.Background(), dyn, testCompositionGVR(), "v0-3-0", "v2", DefinitionRef{})
 	if err != nil {
 		t.Fatalf("updateCompositionsVersion failed: %v", err)
 	}
@@ -372,7 +372,7 @@ func TestUpdateCompositionsVersionFailsFastOnPermanentUpdateError(t *testing.T) 
 		Resource: "fireworksapps",
 	}
 
-	err := UpdateCompositionsVersion(context.Background(), dyn, gvr, "v2")
+	err := UpdateCompositionsVersion(context.Background(), dyn, gvr, "v0-3-0", "v2", DefinitionRef{})
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -412,7 +412,7 @@ func TestUpdateCompositionsVersionStopsRetryWhenContextCanceled(t *testing.T) {
 		Resource: "fireworksapps",
 	}
 
-	err := UpdateCompositionsVersion(ctx, dyn, gvr, "v2")
+	err := UpdateCompositionsVersion(ctx, dyn, gvr, "v0-3-0", "v2", DefinitionRef{})
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -654,6 +654,59 @@ func TestGetCompositionDefinitionsWithVersion(t *testing.T) {
 	}
 	if comps[0].Name != "cd-3" {
 		t.Errorf("expected cd-3, got %s", comps[0].Name)
+	}
+}
+
+func TestUpdateCompositionsVersion_ScopesToOwningDefinition(t *testing.T) {
+	t.Cleanup(func() { retryWait = retry.Wait })
+	retryWait = func(context.Context, time.Duration) error { return nil }
+
+	scheme := runtime.NewScheme()
+	// Two definitions share the CRD; both have an instance labelled the same old version.
+	mine := newOwnedComposition("mine", "default", "v0-3-0", "cd-a", "default")
+	theirs := newOwnedComposition("theirs", "default", "v0-3-0", "cd-b", "default")
+	dyn := fake.NewSimpleDynamicClientWithCustomListKinds(scheme, map[schema.GroupVersionResource]string{
+		{Group: "composition.krateo.io", Version: "v0-3-0", Resource: "fireworksapps"}: "TheCompositionsList",
+	}, mine, theirs)
+	gvr := testCompositionGVR()
+
+	err := UpdateCompositionsVersion(context.Background(), dyn, gvr, "v0-3-0", "v2", DefinitionRef{Name: "cd-a", Namespace: "default"})
+	if err != nil {
+		t.Fatalf("UpdateCompositionsVersion failed: %v", err)
+	}
+
+	got, err := dyn.Resource(gvr).Namespace("default").Get(context.Background(), "mine", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get mine: %v", err)
+	}
+	if l, _, _ := unstructured.NestedStringMap(got.Object, "metadata", "labels"); l[deploy.CompositionVersionLabel] != "v2" {
+		t.Errorf("expected cd-a's instance migrated to v2, got %q", l[deploy.CompositionVersionLabel])
+	}
+
+	got2, err := dyn.Resource(gvr).Namespace("default").Get(context.Background(), "theirs", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get theirs: %v", err)
+	}
+	if l, _, _ := unstructured.NestedStringMap(got2.Object, "metadata", "labels"); l[deploy.CompositionVersionLabel] != "v0-3-0" {
+		t.Errorf("expected cd-b's instance left untouched at v0-3-0, got %q", l[deploy.CompositionVersionLabel])
+	}
+}
+
+func newOwnedComposition(name, namespace, version, defName, defNamespace string) *unstructured.Unstructured {
+	return &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "composition.krateo.io/v0-3-0",
+			"kind":       "FireworksApp",
+			"metadata": map[string]interface{}{
+				"name":      name,
+				"namespace": namespace,
+				"labels": map[string]interface{}{
+					deploy.CompositionVersionLabel:             version,
+					deploy.CompositionDefinitionNameLabel:      defName,
+					deploy.CompositionDefinitionNamespaceLabel: defNamespace,
+				},
+			},
+		},
 	}
 }
 

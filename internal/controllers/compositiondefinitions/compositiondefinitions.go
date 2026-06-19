@@ -355,6 +355,25 @@ func (e *external) ensureCompositionVersionPolicy(ctx context.Context) error {
 	return nil
 }
 
+// versionReferencedByAnotherDefinition reports whether any CompositionDefinition OTHER than
+// (selfName/selfNamespace) currently targets the given generated GVK (group+kind+version). It
+// is the reference count behind safe version retirement: a per-(CRD,version) dynamic controller
+// is shared by every definition on that version, so it may only be torn down once no other
+// definition still needs it.
+func (e *external) versionReferencedByAnotherDefinition(ctx context.Context, gvk schema.GroupVersionKind, selfName, selfNamespace string) (bool, error) {
+	cds, err := getters.GetCompositionDefinitionsWithVersion(ctx, e.mgmt, gvk)
+	if err != nil {
+		return false, err
+	}
+	for i := range cds {
+		if cds[i].Name == selfName && cds[i].Namespace == selfNamespace {
+			continue
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
 func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler.ExternalObservation, error) {
 	cr, ok := mg.(*compositiondefinitionsv1alpha1.CompositionDefinition)
 	if !ok {
@@ -511,6 +530,32 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 			ResourceExists:   true,
 			ResourceUpToDate: false,
 		}, nil
+	}
+
+	// Drive version migration to completion: if any composition still carries a previous
+	// served version's label, report not-up-to-date so Update re-runs and re-stamps it.
+	// The composition-version policy keys off the write endpoint, so a straggler can
+	// survive a prior transition; without this the migration would be one-shot and the
+	// straggler stays orphaned (the new label-scoped controller never selects it).
+	observeOwner := getters.DefinitionRef{Name: cr.Name, Namespace: cr.Namespace}
+	for _, vi := range cr.Status.Managed.VersionInfo {
+		if vi.Version == gvr.Version {
+			continue
+		}
+		// List THROUGH the current served endpoint, selecting by the old version LABEL
+		// (the label, not the served apiVersion, identifies the owning controller) and scoped
+		// to THIS definition — another definition's instances on this version are not ours.
+		stale, err := getters.GetOwnedCompositionsByVersionLabel(ctx, e.dynamic, gvr, vi.Version, observeOwner)
+		if err != nil {
+			return reconciler.ExternalObservation{}, fmt.Errorf("error checking compositions on version %s: %w", vi.Version, err)
+		}
+		if len(stale.Items) > 0 {
+			log.Debug("Compositions pending version migration", "fromVersion", vi.Version, "toVersion", gvr.Version, "count", len(stale.Items))
+			return reconciler.ExternalObservation{
+				ResourceExists:   true,
+				ResourceUpToDate: false,
+			}, nil
+		}
 	}
 
 	if err := status.RefreshCompositionDefinitionStatus(cr, crd, gvr, chartGVK, pkg.PackageURL()); err != nil {
@@ -675,6 +720,21 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 	if oldGVK != gvk {
 		for _, vi := range cr.Status.Managed.VersionInfo {
 			if oldGVK.Kind == cr.Status.Managed.Kind && oldGVK.Version == vi.Version {
+				// Reference-counted retirement: one CRD/Kind can be shared by multiple
+				// CompositionDefinitions at different versions, and a per-(CRD,version)
+				// controller is shared across them. Only retire this version's controller when
+				// NO OTHER definition still targets it — otherwise we'd tear a controller out
+				// from under another definition's instances.
+				referenced, refErr := e.versionReferencedByAnotherDefinition(ctx, schema.GroupVersionKind{
+					Group: oldGVK.Group, Kind: oldGVK.Kind, Version: vi.Version,
+				}, cr.Name, cr.Namespace)
+				if refErr != nil {
+					return fmt.Errorf("error checking references for version %s: %w", vi.Version, refErr)
+				}
+				if referenced {
+					log.Debug("Skipping controller retirement: version still referenced by another CompositionDefinition", "version", vi.Version)
+					continue
+				}
 				err = deploy.Undeploy(ctx, e.kube, deploy.UndeployOptions{
 					DiscoveryClient:        memory.NewMemCacheClient(e.client.Discovery()),
 					RBACFolderPath:         CDCrbacConfigFolder,
@@ -696,13 +756,27 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 			}
 		}
 	}
-	log.Debug("Updating Compositions", "gvr", gvr.String())
-	if oldGVK.Version != gvk.Version && cr.Status.Kind == gvk.Kind && oldGVK.Group == gvk.Group {
-		err = getters.UpdateCompositionsVersion(ctx, e.dynamic, oldGVR, gvk.Version)
-		if err != nil {
-			return fmt.Errorf("error updating compositions version: %w", err)
+	// Migrate any composition still carrying a previous served version's label onto the
+	// current version. Driven by the managed served-versions list rather than a single
+	// status.apiVersion comparison so it is idempotent and self-healing: stragglers from a
+	// prior transition — or a composition (re)written through an old endpoint after status
+	// advanced — are migrated on a later reconcile instead of being orphaned forever (the
+	// new label-scoped controller never selects an old-labelled CR). UpdateCompositionsVersion
+	// is a no-op when nothing carries the old label, so this is safe to run every transition.
+	log.Debug("Migrating Compositions to current version", "gvr", gvr.String())
+	owner := getters.DefinitionRef{Name: cr.Name, Namespace: cr.Namespace}
+	for _, vi := range cr.Status.Managed.VersionInfo {
+		if vi.Version == gvk.Version {
+			continue
 		}
-		log.Debug("Updated compositions version", "gvr", oldGVR.String())
+		// List + re-stamp THROUGH the current served endpoint (gvr, whose version is
+		// gvk.Version): the composition-version policy stamps the request's served version,
+		// so writing via the current endpoint makes it agree with the relabel instead of
+		// re-stamping the old version. Scoped to THIS definition so a shared CRD's other
+		// definitions (legitimately on an older version) are never touched.
+		if err := getters.UpdateCompositionsVersion(ctx, e.dynamic, gvr, vi.Version, gvk.Version, owner); err != nil {
+			return fmt.Errorf("error migrating compositions from version %s: %w", vi.Version, err)
+		}
 	}
 
 	if err := status.RefreshCompositionDefinitionStatus(cr, crd, gvr, gvk, pkgFS.PackageURL()); err != nil {
