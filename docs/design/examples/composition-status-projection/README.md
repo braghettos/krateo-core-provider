@@ -4,6 +4,11 @@ Worked manifests for [`../../composition-status-projection.md`](../../compositio
 **Design draft — these reference proposed `spec` fields (`statusDataTemplate`, `apiRef`,
 `extras`) that do not exist yet.** They illustrate the design; they are not applyable today.
 
+> **`extras` shape is NOT final — blocked on snowplow.** snowplow is adding `extras`
+> *within* `apiRef`; core-provider will copy that shape once released. The `spec.extras`
+> sibling used in `02-compositiondefinition.yaml` is a placeholder and will likely move
+> nested under `apiRef`.
+
 | File | What |
 |---|---|
 | `01-phase1-minimal.yaml` | Phase 1 — built-ins only (`.self`/`.helm`); no I/O, no RBAC |
