@@ -1,0 +1,32 @@
+# A Composition instance a user applies. Its spec IS the chart values (== .self.spec in
+# the projection jq root). The generated CRD's GVK comes from the chart (Chart.yaml).
+apiVersion: composition.krateo.io/v1-2-0
+kind: FireworksApp
+metadata:
+  name: demo
+  namespace: apps
+spec:
+  service:
+    host: demo.example.com
+    port: 8080
+  replicas: 3
+
+# ---------------------------------------------------------------------------------------
+# After a CDC reconcile (with 02 + 03 applied), .status is projected to roughly:
+#
+# status:
+#   url: https://demo.example.com:8080        # from .self.spec
+#   chartVersion: 1.2.0                        # from .helm
+#   endpoint: 34.120.55.10                     # from .api.svc (Service LB IP)
+#   readyReplicas: 3                           # aggregated from .api.deploys
+#   desiredReplicas: 3
+#   backendUp: true                            # from .api.health (external)
+#   endpoints: [ { name: demo-web, ip: 34.120.55.10 } ]
+#   ready: true                                # rollup expression
+#   observedGeneration: 1
+#   # baseline fields the CDC already writes today:
+#   helmChartUrl: oci://registry.krateo.io/charts/fireworksapp
+#   helmChartVersion: 1.2.0
+#   managed: [ ... ]
+#   conditions: [ { type: Ready, status: "True" }, { type: Synced, status: "True" } ]
+# ---------------------------------------------------------------------------------------

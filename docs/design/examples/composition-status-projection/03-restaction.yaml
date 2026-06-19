@@ -1,0 +1,52 @@
+# The RESTAction referenced by the CompositionDefinition's apiRef, plus its endpoint Secrets.
+# Resolved synchronously under snowplow's own ServiceAccount; the CDC holds no credentials.
+#
+# The kube API server is just an HTTP endpoint, so in-cluster reads are RESTAction calls too
+# (no separate "resourcesRefs"). Paths reference the author-declared extras (.namespace,
+# .compositionId), so calls are label-scoped and need no hard-coded, chart-templated names.
+apiVersion: templates.krateo.io/v1
+kind: RESTAction
+metadata:
+  name: fireworksapp-status
+  namespace: krateo-system
+spec:
+  api:
+    - name: svc                              # LIST Services for this composition (kube API)
+      path: ${ "/api/v1/namespaces/\(.namespace)/services?labelSelector=krateo.io/composition-id=\(.compositionId)" }
+      endpointRef:
+        name: kube-local
+        namespace: krateo-system
+    - name: deploys                          # LIST Deployments for this composition
+      path: ${ "/apis/apps/v1/namespaces/\(.namespace)/deployments?labelSelector=krateo.io/composition-id=\(.compositionId)" }
+      endpointRef:
+        name: kube-local
+        namespace: krateo-system
+    - name: health                           # external API
+      path: /healthz
+      endpointRef:
+        name: backend-endpoint
+        namespace: krateo-system
+---
+# Endpoint Secret for the in-cluster kube API. The token is snowplow's own SA token,
+# which must carry get/list on services + deployments (this is where the RBAC lives —
+# on snowplow's SA, NOT on the CDC).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: kube-local
+  namespace: krateo-system
+type: Opaque
+stringData:
+  server-url: https://kubernetes.default.svc
+  token: "<snowplow-SA token: get/list services,deployments>"
+---
+# Endpoint Secret for the external backend API (URL + credentials).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: backend-endpoint
+  namespace: krateo-system
+type: Opaque
+stringData:
+  server-url: https://api.backend.internal
+  token: "<backend api token>"

@@ -1,0 +1,64 @@
+# Full CompositionDefinition — built-ins + apiRef (RESTAction) + author-declared extras.
+# Requires the RESTAction and Secrets in 03-restaction.yaml.
+apiVersion: core.krateo.io/v1alpha1
+kind: CompositionDefinition
+metadata:
+  name: fireworksapp
+  namespace: krateo-system
+spec:
+  chart:
+    url: oci://registry.krateo.io/charts/fireworksapp
+    version: 1.2.0
+
+  # The RESTAction whose calls are resolved at reconcile, under snowplow's own SA.
+  # Results are keyed by call name under ".api" in the jq root (.api.svc, .api.deploys, …).
+  apiRef:
+    name: fireworksapp-status
+    namespace: krateo-system
+
+  # Author-declared context that seeds the RESTAction's jq root.
+  # Each value is a ${ jq } expression over the Composition INSTANCE, or a literal.
+  # The CDC evaluates these per reconcile and passes the map to snowplow as Extras.
+  extras:
+    compositionId: ${ .metadata.uid }
+    namespace:     ${ .metadata.namespace }
+    region:        eu-west                   # a literal
+
+  statusDataTemplate:
+    # --- built-ins (.self / .helm), no I/O ---
+    - forPath: url
+      expression: ${ "https://\(.self.spec.service.host):\(.self.spec.service.port)" }
+    - forPath: chartVersion
+      expression: ${ .helm.version }
+
+    # --- managed objects via the kube-API RESTAction calls (.api.*) ---
+    - forPath: endpoint                        # the Service's load-balancer IP
+      expression: ${ .api.svc.items[0].status.loadBalancer.ingress[0].ip }
+      type: string
+    - forPath: readyReplicas                   # aggregate across the comp's Deployments
+      expression: ${ [ .api.deploys.items[].status.readyReplicas // 0 ] | add }
+      type: integer
+    - forPath: desiredReplicas
+      expression: ${ [ .api.deploys.items[].spec.replicas // 0 ] | add }
+      type: integer
+
+    # --- external system (.api.health) ---
+    - forPath: backendUp
+      expression: ${ .api.health.status == "UP" }
+      type: boolean
+
+    # --- complex output (array of objects) built with jq ---
+    - forPath: endpoints
+      expression: ${ [ .api.svc.items[] | { name: .metadata.name, ip: (.status.loadBalancer.ingress[0].ip // null) } ] }
+      schema:
+        type: array
+        items:
+          type: object
+          properties:
+            name: { type: string }
+            ip:   { type: string }
+
+    # --- readiness rollup as an expression (no kstatus for the common case) ---
+    - forPath: ready
+      expression: ${ (.helm.status == "deployed") and ([ .api.deploys.items[] | .status.readyReplicas == .spec.replicas ] | all) }
+      type: boolean

@@ -1,0 +1,23 @@
+# Phase 1 — built-ins only (.self / .helm). No apiRef, no extras.
+# Cheap: no external I/O, no new RBAC, no watches. This alone covers derived URLs,
+# chart metadata, and a hand-written readiness expression.
+apiVersion: core.krateo.io/v1alpha1
+kind: CompositionDefinition
+metadata:
+  name: fireworksapp
+  namespace: krateo-system
+spec:
+  chart:
+    url: oci://registry.krateo.io/charts/fireworksapp
+    version: 1.2.0
+
+  statusDataTemplate:
+    - forPath: url
+      expression: ${ "https://\(.self.spec.service.host):\(.self.spec.service.port)" }
+
+    - forPath: chartVersion
+      expression: ${ .helm.version }
+
+    - forPath: ready                         # "readiness" is just an expression
+      expression: ${ .helm.status == "deployed" }
+      type: boolean
