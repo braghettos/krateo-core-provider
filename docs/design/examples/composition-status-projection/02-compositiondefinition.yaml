@@ -19,6 +19,9 @@ spec:
   # Author-declared context that seeds the RESTAction's jq root.
   # Each value is a ${ jq } expression over the Composition INSTANCE, or a literal.
   # The CDC evaluates these per reconcile and passes the map to snowplow as Extras.
+  #
+  # SHAPE NOT FINAL — blocked on snowplow: snowplow is adding `extras` *within* apiRef;
+  # core-provider will copy that shape. This sibling placement is a placeholder.
   extras:
     compositionId: ${ .metadata.uid }
     namespace:     ${ .metadata.namespace }

@@ -199,7 +199,12 @@ type CompositionDefinitionSpec struct {
     // Extras is author-declared context that seeds the RESTAction's jq root (the resolver's
     // Extras hook, §4.3). Each value is a ${ jq } expression evaluated against the
     // Composition instance each reconcile (or a literal); the CDC builds the map and passes
-    // it to snowplow. Lives alongside ApiRef because it parameterises its calls.
+    // it to snowplow.
+    //
+    // SHAPE/PLACEMENT PENDING SNOWPLOW (do not finalise): snowplow is adding `extras`
+    // *within* `apiRef`. core-provider should COPY that shape once released — i.e. extras
+    // will most likely live nested under ApiRef, not as this sibling field. Shown here as a
+    // sibling only as a placeholder. (§11)
     // +optional
     Extras map[string]string `json:"extras,omitempty"`
 
@@ -328,11 +333,17 @@ service-to-service entrypoint in snowplow**:
   (`apiref.Resolve` → `restactions.Resolve`): `Extras` seeds the jq root that each call's
   `path`/`payload`/`headers`/`filter` is evaluated against (`restactions/api/resolve.go:80`).
 
-  **Extras are author-declared on the `CompositionDefinition` (`spec.extras`, alongside
-  `apiRef`)** — the author decides what the RESTAction receives. Each value is a `${ jq }`
-  expression evaluated against the **Composition instance** (or a literal); the CDC builds
-  the map per reconcile and passes it to snowplow. This drives e.g. a **label-scoped
-  kube-API LIST** with no hard-coded (chart-templated) names:
+  **Extras are author-declared** — the author decides what the RESTAction receives. Each
+  value is a `${ jq }` expression evaluated against the **Composition instance** (or a
+  literal); the CDC builds the map per reconcile and passes it to snowplow.
+
+  > **Pending snowplow (do not finalise the shape).** snowplow is adding `extras` *within*
+  > `apiRef`; core-provider will **copy that shape** once released rather than invent its
+  > own. The `spec.extras` sibling shown below is a placeholder — expect it to move nested
+  > under `apiRef`. (§11)
+
+  This drives e.g. a **label-scoped kube-API LIST** with no hard-coded (chart-templated)
+  names:
 
   ```yaml
   # on the CompositionDefinition, next to apiRef:
@@ -539,8 +550,10 @@ synced with upstream and all forks pin `braghettos/plumbing v1.7.6` (§ alignmen
 - **Versioning interaction**: behaviour of projected fields across the full/parallel/
   selective migration patterns (mappings are per-`CompositionDefinition`-version → ride the
   existing per-version status stamping; needs an explicit test).
-- **Extras evaluation scope**: `spec.extras` `${ jq }` evaluate against the Composition
-  instance (`self`) only, or also `.helm` (in-hand pre-resolution)? Lean `self` only.
+- **Extras shape — BLOCKED on snowplow.** snowplow is adding `extras` *within* `apiRef`;
+  core-provider will copy that exact shape once released (do not finalise our own
+  `spec.extras` placement until then). Open sub-question once it lands: do the `${ jq }`
+  evaluate against the Composition instance (`self`) only, or also `.helm`? Lean `self`.
 
 ---
 
