@@ -539,3 +539,158 @@ synced with upstream and all forks pin `braghettos/plumbing v1.7.6` (§ alignmen
 - **Versioning interaction**: behaviour of projected fields across the full/parallel/
   selective migration patterns (mappings are per-`CompositionDefinition`-version → ride the
   existing per-version status stamping; needs an explicit test).
+- **Extras evaluation scope**: `spec.extras` `${ jq }` evaluate against the Composition
+  instance (`self`) only, or also `.helm` (in-hand pre-resolution)? Lean `self` only.
+
+---
+
+## 12. Worked example (end to end)
+
+Exercises every part: built-ins (`self`/`helm`), author-declared `extras`, an `apiRef`
+RESTAction doing `Extras`-driven label-scoped **kube-API** reads + an **external** call, and
+the full range of `statusDataTemplate` expressions (copy / derived / aggregate / complex /
+readiness).
+
+**(1) `CompositionDefinition`:**
+
+```yaml
+apiVersion: core.krateo.io/v1alpha1
+kind: CompositionDefinition
+metadata: { name: fireworksapp, namespace: krateo-system }
+spec:
+  chart: { url: oci://registry.krateo.io/charts/fireworksapp, version: 1.2.0 }
+
+  apiRef: { name: fireworksapp-status, namespace: krateo-system }
+
+  extras:                                       # author-declared, ${ jq } over the instance
+    compositionId: ${ .metadata.uid }
+    namespace:     ${ .metadata.namespace }
+    region:        eu-west                      # a literal
+
+  statusDataTemplate:
+    # built-ins (.self/.helm) — Phase 1, no I/O
+    - forPath: url
+      expression: ${ "https://\(.self.spec.service.host):\(.self.spec.service.port)" }
+    - forPath: chartVersion
+      expression: ${ .helm.version }
+    # managed objects via the kube-API RESTAction calls (.api.*) — Phase 2
+    - forPath: endpoint
+      expression: ${ .api.svc.items[0].status.loadBalancer.ingress[0].ip }
+      type: string
+    - forPath: readyReplicas
+      expression: ${ [ .api.deploys.items[].status.readyReplicas // 0 ] | add }
+      type: integer
+    - forPath: desiredReplicas
+      expression: ${ [ .api.deploys.items[].spec.replicas // 0 ] | add }
+      type: integer
+    # external API (.api.health)
+    - forPath: backendUp
+      expression: ${ .api.health.status == "UP" }
+      type: boolean
+    # complex (array of objects) built with jq
+    - forPath: endpoints
+      expression: ${ [ .api.svc.items[] | { name: .metadata.name, ip: (.status.loadBalancer.ingress[0].ip // null) } ] }
+      schema:
+        type: array
+        items: { type: object, properties: { name: {type: string}, ip: {type: string} } }
+    # readiness as an expression — no kstatus needed for the common case
+    - forPath: ready
+      expression: ${ (.helm.status == "deployed") and ([ .api.deploys.items[] | .status.readyReplicas == .spec.replicas ] | all) }
+      type: boolean
+```
+
+**(2) The referenced `RESTAction` (+ endpoint Secrets):**
+
+```yaml
+apiVersion: templates.krateo.io/v1
+kind: RESTAction
+metadata: { name: fireworksapp-status, namespace: krateo-system }
+spec:
+  api:
+    - name: svc                                 # kube API is just an HTTP endpoint
+      path: ${ "/api/v1/namespaces/\(.namespace)/services?labelSelector=krateo.io/composition-id=\(.compositionId)" }
+      endpointRef: { name: kube-local, namespace: krateo-system }
+    - name: deploys
+      path: ${ "/apis/apps/v1/namespaces/\(.namespace)/deployments?labelSelector=krateo.io/composition-id=\(.compositionId)" }
+      endpointRef: { name: kube-local, namespace: krateo-system }
+    - name: health                              # external API
+      path: /healthz
+      endpointRef: { name: backend-endpoint, namespace: krateo-system }
+---
+apiVersion: v1
+kind: Secret
+metadata: { name: kube-local, namespace: krateo-system }
+stringData: { server-url: https://kubernetes.default.svc, token: "<snowplow-SA token: get/list services+deployments>" }
+---
+apiVersion: v1
+kind: Secret
+metadata: { name: backend-endpoint, namespace: krateo-system }
+stringData: { server-url: https://api.backend.internal, token: "<backend api token>" }
+```
+
+**(3) A `Composition` instance (what a user applies):**
+
+```yaml
+apiVersion: composition.krateo.io/v1-2-0
+kind: FireworksApp
+metadata: { name: demo, namespace: apps }
+spec:                                           # == chart values (== .self.spec)
+  service: { host: demo.example.com, port: 8080 }
+  replicas: 3
+```
+
+**(4) Resolution at reconcile.** The CDC evaluates `spec.extras` against the instance →
+`{ compositionId: "9b1c-…", namespace: "apps", region: "eu-west" }`, passes it to snowplow
+(own SA). The RESTAction's jq root becomes those extras; each call merges its response in by
+name. The combined `resolved` root the engine sees:
+
+```jsonc
+{ "self": { "spec": { "service": { "host": "demo.example.com", "port": 8080 }, "replicas": 3 } },
+  "helm": { "version": "1.2.0", "status": "deployed", "revision": 1 },
+  "api":  { "svc":     { "items": [ { "metadata": { "name": "demo-web" }, "status": { "loadBalancer": { "ingress": [ { "ip": "34.120.55.10" } ] } } } ] },
+            "deploys": { "items": [ { "spec": { "replicas": 3 }, "status": { "readyReplicas": 3 } } ] },
+            "health":  { "status": "UP" } } }
+```
+
+**(5) Resulting `Composition` `.status`:**
+
+```yaml
+status:
+  url: https://demo.example.com:8080
+  chartVersion: 1.2.0
+  endpoint: 34.120.55.10
+  readyReplicas: 3
+  desiredReplicas: 3
+  backendUp: true
+  endpoints: [ { name: demo-web, ip: 34.120.55.10 } ]
+  ready: true
+  observedGeneration: 1                         # set by SetObservedGeneration
+  # baseline fields the CDC already writes today:
+  helmChartUrl: oci://registry.krateo.io/charts/fireworksapp
+  helmChartVersion: 1.2.0
+  managed: [ … ]
+  conditions: [ { type: Ready, status: "True", … }, { type: Synced, status: "True", … } ]
+```
+
+**(6) Generated CRD status schema (added from `statusDataTemplate`):**
+
+```yaml
+status:
+  type: object
+  properties:
+    url:             { type: string }
+    chartVersion:    { type: string }
+    endpoint:        { type: string }
+    readyReplicas:   { type: integer }
+    desiredReplicas: { type: integer }
+    backendUp:       { type: boolean }
+    endpoints:       { type: array, items: { type: object, properties: { name: {type: string}, ip: {type: string} } } }
+    ready:           { type: boolean }
+    # + baseline helmChartUrl/helmChartVersion/managed/conditions/observedGeneration
+```
+
+Notes: **Phase 1 alone** (drop `apiRef`/`extras` and the `.api.*` fields) already yields
+`url`, `chartVersion`, `ready`-from-helm — cheap, no I/O, no new RBAC. The only credential
+holder is **snowplow's SA** (`kube-local`/`backend-endpoint` tokens); the CDC just calls
+snowplow and projects. `endpoints`/`readyReplicas`/`ready` show jq doing construction,
+aggregation, and rollup with no separate readiness machinery.
