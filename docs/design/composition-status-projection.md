@@ -475,6 +475,24 @@ _, err = tools.UpdateStatus(ctx, mg, tools.UpdateOptions{Pluralizer: h.pluralize
 already renders for it (preferred over CRD annotations), extended with the serialized
 `statusDataTemplate` + `apiRef`.
 
+**`snowplow.Resolve` is the existing chart-inspector integration pattern, reused.** The CDC
+already calls an in-cluster service synchronously during reconcile: `internal/chartinspector`
+is a small HTTP client whose server URL core-provider injects into the CDC's ConfigMap as
+`URL_CHART_INSPECTOR`; `Observe`/`Create` do an HTTP GET `/resources` passing the composition
+identity as query params and decode JSON (→ rbacgen). The snowplow client is a **copy of that
+shape**:
+
+| | `internal/chartinspector` (today) | `internal/snowplow` (new) |
+|---|---|---|
+| URL | `URL_CHART_INSPECTOR` (CDC ConfigMap, core-provider renders) | `URL_SNOWPLOW`, same ConfigMap / render path |
+| Call | sync HTTP GET `/resources` in reconcile | sync resolve call in reconcile (when `apiRef != nil`) |
+| Context | composition identity as query params | composition identity as **request-extras** (`?extras=` JSON) |
+| Response | `[]Resource` → rbacgen | resolved `.api` map → `statusprojection` |
+
+So the **client side is a known, proven pattern** — only the *server* side is new: snowplow
+needs an own-SA (`InClusterConfig`), non-`UserConfig` resolve endpoint (the `/call` path is
+user-scoped). That, plus its security bounding, is the sole remaining unknown (§11).
+
 ---
 
 ## 7. Deferred (Phase 2+)
@@ -551,9 +569,11 @@ synced with upstream and all forks pin `braghettos/plumbing v1.7.6` (§ alignmen
 
 ## 11. Open questions
 
-- **Snowplow service-mode entrypoint** (§4.3): the own-SA resolve API shape (context is
-  already handled — pass it via the resolver's existing `Extras` hook); and the **security
-  bounding** of what it may resolve/reach under snowplow's SA.
+- **Snowplow service-mode entrypoint** (§4.3/§6.1): client side is settled — it copies the
+  existing `internal/chartinspector` integration (sync HTTP to an in-cluster service, URL via
+  the CDC ConfigMap), and context rides the resolver's `Extras` hook. The only unknowns are
+  **server-side**: snowplow needs an own-SA (`InClusterConfig`), non-`UserConfig` resolve
+  endpoint, plus the **security bounding** of what it may resolve/reach under its SA.
 - **Multi-cluster `apiRef` placement** (§4.3): resolve on management cluster vs. project a
   resolver + RESTAction/Secrets into the target.
 - **Shared-types home** (§9): lift snowplow's types + resolver into `plumbing` vs. duplicate;
