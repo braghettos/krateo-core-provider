@@ -390,10 +390,20 @@ The RESTAction call accepts **caller context** via the resolver's existing
   **degrade the field, never fail the reconcile** (per-mapping error →
   `Synced=False/ReconcileError`). Status reflects last successful resolution.
 
-> **Multi-cluster placement (open).** The CDC may run in a remote target cluster. Decide
-> whether snowplow resolution happens on the management cluster (CDC calls back) or whether
-> a snowplow resolver + the RESTAction/Secrets must exist in the target. `apiRef` may be
-> management-local initially. (§11)
+> **Multi-cluster placement — resolution is cluster-local (it runs where the CDC runs).**
+> This obeys the multi-cluster design's rule (`multicluster-compositions.md`): steady state
+> uses the target's *own* identity, mgmt only bootstraps. So:
+> - **Local compositions** (no `targetRef`): CDC + snowplow + authn all on mgmt — works as
+>   written.
+> - **Remote targets:** built-ins (Phase 1) need no cross-cluster anything and work
+>   immediately. A **readiness rollup from managed objects is target-local** — a kube-API
+>   RESTAction the CDC can resolve under its **own target SA** (no external creds, no mgmt
+>   snowplow, no cross-cluster auth). Only **external-API** `apiRef` wants the central
+>   snowplow+authn path and hits the `TokenReview`/data boundaries — **deferred**, with
+>   **target-local resolution** (a resolver + auth projected into the target, reading target
+>   objects under a target identity) as the intended architecture. Fallback: mgmt-side
+>   resolution reaching the target via the `KubernetesTarget` client (re-introduces central
+>   credential custody). (§11)
 
 > **Alternative (rejected for now).** The CDC could link snowplow's resolver **in-process**
 > under its own SA — no network hop, but credentials return to every CDC. Rejected: keeping
@@ -596,8 +606,13 @@ synced with upstream and all forks pin `braghettos/plumbing v1.7.6` (§ alignmen
   - New code is only the **TokenReview + exchange endpoint in authn** (no `TokenReview` use
     there yet); minting + clientconfig provisioning already exist. *(authn-repo workstream;
     prerequisite for Phase 2 `apiRef`.)*
-- **Multi-cluster `apiRef` placement** (§4.3): resolve on management cluster vs. project a
-  resolver + RESTAction/Secrets into the target.
+- **Multi-cluster `apiRef`** (§4.3): principle settled — **resolution is cluster-local**
+  (runs where the CDC runs), per the multi-cluster steady-state-is-target-local rule. Local
+  compositions: full feature. Remote targets: built-ins + target-local readiness rollups
+  work now; only remote **external-API** `apiRef` is deferred, with **target-local
+  resolution** as the intended architecture (vs. a mgmt-side fallback reaching in via the
+  `KubernetesTarget` client). Open: whether/when to project a slim resolver + authn into
+  targets vs. CDC-direct for target-local kube reads.
 - **Shared-types home** (§9): lift snowplow's types + resolver into `plumbing` vs. duplicate;
   reconcile the plumbing version skew.
 - **Engine dependency boundary**: `statusprojection` imports `plumbing/jqutil` directly
