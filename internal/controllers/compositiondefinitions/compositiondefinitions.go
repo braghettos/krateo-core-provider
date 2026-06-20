@@ -457,6 +457,25 @@ func (e *external) pruneStaleServedVersions(ctx context.Context, gvk schema.Grou
 	for _, v := range prunable {
 		pruneSet[v] = true
 	}
+	// The apiserver forbids removing a version from spec.versions while it is still listed in
+	// status.storedVersions (a version that was, at some point, a storage version — e.g. the very
+	// first served version before "vacuum" became the permanent storage version). Trim the pruned
+	// versions out of storedVersions FIRST, via the status subresource, then remove them from
+	// spec.versions. Safe: the migration loop re-writes every Composition through the current served
+	// endpoint, so all data is now persisted at the current storage version ("vacuum") — none remains
+	// at these retired versions. Without this the whole spec update is rejected and nothing prunes.
+	var keptStored []string
+	for _, sv := range crd.Status.StoredVersions {
+		if !pruneSet[sv] {
+			keptStored = append(keptStored, sv)
+		}
+	}
+	if len(keptStored) != len(crd.Status.StoredVersions) {
+		crd.Status.StoredVersions = keptStored
+		if err := e.kube.Status().Update(ctx, crd); err != nil {
+			return fmt.Errorf("trimming storedVersions before prune: %w", err)
+		}
+	}
 	if !crdutils.RemoveStaleVersions(crd, pruneSet) {
 		return nil
 	}
