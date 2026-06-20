@@ -569,11 +569,22 @@ synced with upstream and all forks pin `braghettos/plumbing v1.7.6` (§ alignmen
 
 ## 11. Open questions
 
-- **Snowplow service-mode entrypoint** (§4.3/§6.1): client side is settled — it copies the
-  existing `internal/chartinspector` integration (sync HTTP to an in-cluster service, URL via
-  the CDC ConfigMap), and context rides the resolver's `Extras` hook. The only unknowns are
-  **server-side**: snowplow needs an own-SA (`InClusterConfig`), non-`UserConfig` resolve
-  endpoint, plus the **security bounding** of what it may resolve/reach under its SA.
+- **Snowplow service-mode entrypoint — the JWT problem (the live blocker).** The existing
+  `/call` cannot be reused: its `UserConfig` middleware requires an `Authorization: Bearer`
+  **JWT signed with snowplow's signing key**, resolves the user, and loads a per-user
+  `<user>-clientconfig` — i.e. the JWT is *how snowplow scopes k8s RBAC per identity*. The
+  CDC is not a user. Client side is otherwise settled (chart-inspector pattern, §6.1). Two
+  server-side paths, and **the JWT issue and the "security bounding" are the same question**
+  — resolution must run under a *dedicated, least-privilege identity*, never snowplow's main SA:
+  - **(A) New own-SA / dedicated-SA resolve endpoint, no JWT** — not `UserConfig`-wrapped;
+    runs under a pinned **scoped** identity (`InClusterConfig`/a dedicated resolver SA).
+    Simplest client. Partly precedented: snowplow already resolves under an SA-endpoint
+    internally (`xcontext.WithUserConfig(saEP)` in phase-1 prewarm/pip-seed). **Recommended**,
+    pinned to a dedicated resolver SA (not main).
+  - **(B) Mint a service JWT for a dedicated authn "service user"** with bounded
+    `clientconfig`, and call `/call` unchanged. Most in-grain with snowplow's identity model,
+    but drags the CDC into authn/JWT-minting + the shared signing key — the coupling we
+    avoided by keeping credentials out of the CDC.
 - **Multi-cluster `apiRef` placement** (§4.3): resolve on management cluster vs. project a
   resolver + RESTAction/Secrets into the target.
 - **Shared-types home** (§9): lift snowplow's types + resolver into `plumbing` vs. duplicate;
