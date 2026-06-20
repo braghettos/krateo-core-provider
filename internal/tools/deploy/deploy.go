@@ -82,6 +82,13 @@ type DeployOptions struct {
 	// widgetDataTemplate shape) from the CompositionDefinition, rendered into the CDC
 	// ConfigMap as COMPOSITION_CONTROLLER_STATUS_DATA_TEMPLATE. Empty disables projection.
 	StatusDataTemplate string
+	// ApiRefName / ApiRefNamespace identify the RESTAction the CDC resolves (via snowplow)
+	// each reconcile to populate the ".api" projection source. Empty disables apiRef
+	// resolution. ApiRefExtras is the JSON-serialized inline extras (snowplow
+	// spec.apiRef.extras), rendered alongside as COMPOSITION_CONTROLLER_API_REF_*.
+	ApiRefName      string
+	ApiRefNamespace string
+	ApiRefExtras    string
 	// DryRunServer is used to determine if the deployment should be applied in dry-run mode. This is ignored in lookup mode
 	DryRunServer bool
 }
@@ -408,7 +415,10 @@ func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 	err = objects.CreateK8sObject(&cm, opts.GVR, getCDCConfigmapNN(namespacedName), opts.ConfigmapTemplatePath,
 		"composition_controller_sa_name", sa.Name,
 		"composition_controller_sa_namespace", sa.Namespace,
-		"status_data_template", opts.StatusDataTemplate)
+		"status_data_template", opts.StatusDataTemplate,
+		"api_ref_name", opts.ApiRefName,
+		"api_ref_namespace", opts.ApiRefNamespace,
+		"api_ref_extras", opts.ApiRefExtras)
 	if err != nil {
 		return "", err
 	}
@@ -568,7 +578,10 @@ func Undeploy(ctx context.Context, kube client.Client, opts UndeployOptions) err
 	err = objects.CreateK8sObject(&cm, opts.GVR, getCDCConfigmapNN(namespacedName), opts.ConfigmapTemplatePath,
 		"composition_controller_sa_name", sa.Name,
 		"composition_controller_sa_namespace", sa.Namespace,
-		"status_data_template", "")
+		"status_data_template", "",
+		"api_ref_name", "",
+		"api_ref_namespace", "",
+		"api_ref_extras", "")
 	if err != nil {
 		return err
 	}
@@ -732,7 +745,10 @@ func Lookup(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 	err = objects.CreateK8sObject(&cm, opts.GVR, getCDCConfigmapNN(namespacedName), opts.ConfigmapTemplatePath,
 		"composition_controller_sa_name", sa.Name,
 		"composition_controller_sa_namespace", sa.Namespace,
-		"status_data_template", opts.StatusDataTemplate)
+		"status_data_template", opts.StatusDataTemplate,
+		"api_ref_name", opts.ApiRefName,
+		"api_ref_namespace", opts.ApiRefNamespace,
+		"api_ref_extras", opts.ApiRefExtras)
 	if err != nil {
 		return "", err
 	}

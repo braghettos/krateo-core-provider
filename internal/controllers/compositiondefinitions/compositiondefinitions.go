@@ -398,6 +398,34 @@ func encodeStatusDataTemplate(cr *compositiondefinitionsv1alpha1.CompositionDefi
 	return string(b)
 }
 
+// encodeApiRefExtras serializes the CompositionDefinition's apiRef.extras (the inline,
+// author-declared static map, snowplow spec.apiRef.extras) to a compact JSON object for
+// delivery to the CDC via COMPOSITION_CONTROLLER_API_REF_EXTRAS. Empty when no apiRef or no
+// extras are declared.
+func encodeApiRefExtras(cr *compositiondefinitionsv1alpha1.CompositionDefinition) string {
+	if cr.Spec.ApiRef == nil || cr.Spec.ApiRef.Extras == nil {
+		return ""
+	}
+	// Extras is an apiextensionsv1.JSON; its Raw is already the JSON encoding.
+	return string(cr.Spec.ApiRef.Extras.Raw)
+}
+
+// apiRefName / apiRefNamespace return the referenced RESTAction coordinates, or "" when no
+// apiRef is declared (which disables ".api" resolution in the CDC).
+func apiRefName(cr *compositiondefinitionsv1alpha1.CompositionDefinition) string {
+	if cr.Spec.ApiRef == nil {
+		return ""
+	}
+	return cr.Spec.ApiRef.Name
+}
+
+func apiRefNamespace(cr *compositiondefinitionsv1alpha1.CompositionDefinition) string {
+	if cr.Spec.ApiRef == nil {
+		return ""
+	}
+	return cr.Spec.ApiRef.Namespace
+}
+
 // statusFieldsFromSpec maps the CompositionDefinition's statusDataTemplate declarations to
 // the generation package's decoupled StatusField list (used to validate and to inject the
 // declared properties into the generated CRD's status schema).
@@ -556,6 +584,9 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 		ServiceTemplatePath:    ServiceTemplatePath,
 		DynClient:              e.dynamic,
 		StatusDataTemplate:     encodeStatusDataTemplate(cr),
+		ApiRefName:             apiRefName(cr),
+		ApiRefNamespace:        apiRefNamespace(cr),
+		ApiRefExtras:           encodeApiRefExtras(cr),
 		DryRunServer:           true,
 	}
 	dig, err := deploy.Deploy(ctx, e.kube, opts)
@@ -680,6 +711,9 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) error {
 		JsonSchemaBytes:        specSchemaBytes,
 		DynClient:              e.dynamic,
 		StatusDataTemplate:     encodeStatusDataTemplate(cr),
+		ApiRefName:             apiRefName(cr),
+		ApiRefNamespace:        apiRefNamespace(cr),
+		ApiRefExtras:           encodeApiRefExtras(cr),
 	}
 
 	dig, err := deploy.Deploy(ctx, e.kube, opts)
@@ -760,6 +794,9 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 		JsonSchemaBytes:        specSchemaBytes,
 		DynClient:              e.dynamic,
 		StatusDataTemplate:     encodeStatusDataTemplate(cr),
+		ApiRefName:             apiRefName(cr),
+		ApiRefNamespace:        apiRefNamespace(cr),
+		ApiRefExtras:           encodeApiRefExtras(cr),
 	}
 
 	dig, err := deploy.Deploy(ctx, e.kube, opts)
