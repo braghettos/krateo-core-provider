@@ -9,3 +9,6 @@ data:
   HOME: /tmp # home should be set to /tmp or any other writable directory to avoid permission issues with helm https://github.com/helm/helm/issues/8038
   URL_CHART_INSPECTOR: http://chart-inspector-service.demo-system.svc.cluster.local:8081/
   COMPOSITION_CONTROLLER_STATUS_DATA_TEMPLATE: {{ .status_data_template | quote }}
+  COMPOSITION_CONTROLLER_API_REF_NAME: {{ .api_ref_name | quote }}
+  COMPOSITION_CONTROLLER_API_REF_NAMESPACE: {{ .api_ref_namespace | quote }}
+  COMPOSITION_CONTROLLER_API_REF_EXTRAS: {{ .api_ref_extras | quote }}
