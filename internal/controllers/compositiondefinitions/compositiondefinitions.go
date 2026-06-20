@@ -387,6 +387,57 @@ func (e *external) versionReferencedByAnotherDefinition(ctx context.Context, gvk
 	return false, nil
 }
 
+// pruneStaleServedVersions removes from the generated CRD any served version that is no longer in
+// use: not the current version (gvk.Version), not the "vacuum" storage version, not referenced by
+// any OTHER CompositionDefinition, and not carried by any Composition instance's
+// krateo.io/composition-version label. Without it every version hop leaves its served version in
+// spec.versions forever (#103) — dead weight, and a stale served endpoint a client can pick that
+// silently prunes fields written through it. Uses kube.Update (not ApplyOrUpdateCRD, which is
+// append-only) to actually remove versions. Best-effort: the caller logs and retries on the next
+// reconcile. The current version and vacuum are always kept, so the CRD always has a served
+// version and its storage version.
+func (e *external) pruneStaleServedVersions(ctx context.Context, gvk schema.GroupVersionKind, gvr schema.GroupVersionResource, selfName, selfNamespace string) error {
+	crd, err := crdclient.Get(ctx, e.kube, gvr.GroupResource())
+	if err != nil {
+		return fmt.Errorf("fetching CRD for prune: %w", err)
+	}
+	prune := map[string]bool{}
+	for _, v := range crd.Spec.Versions {
+		if v.Name == "vacuum" || v.Name == gvk.Version {
+			continue // never the storage version or the current served version
+		}
+		referenced, err := e.versionReferencedByAnotherDefinition(ctx, schema.GroupVersionKind{
+			Group: gvk.Group, Kind: gvk.Kind, Version: v.Name,
+		}, selfName, selfNamespace)
+		if err != nil {
+			return fmt.Errorf("checking references for version %s: %w", v.Name, err)
+		}
+		if referenced {
+			continue // another definition is still on this version
+		}
+		insts, err := getters.GetCompositionsByVersionLabel(ctx, e.dynamic,
+			schema.GroupVersionResource{Group: gvr.Group, Version: v.Name, Resource: gvr.Resource}, v.Name)
+		if err != nil {
+			return fmt.Errorf("listing instances for version %s: %w", v.Name, err)
+		}
+		if insts != nil && len(insts.Items) > 0 {
+			continue // an instance still carries this version's label
+		}
+		prune[v.Name] = true
+	}
+	if len(prune) == 0 {
+		return nil
+	}
+	if !crdutils.RemoveStaleVersions(crd, prune) {
+		return nil
+	}
+	if err := e.kube.Update(ctx, crd); err != nil {
+		return fmt.Errorf("applying pruned CRD: %w", err)
+	}
+	e.log.Debug("Pruned stale served versions from CRD", "gvr", gvr.String(), "count", len(prune))
+	return nil
+}
+
 // encodeStatusDataTemplate serializes the CompositionDefinition's statusDataTemplate to the
 // engine's JSON wire format ([{forPath,expression}]) for delivery to the CDC via its
 // ConfigMap (COMPOSITION_CONTROLLER_STATUS_DATA_TEMPLATE). Empty when nothing is declared.
@@ -889,6 +940,15 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 		if err := getters.UpdateCompositionsVersion(ctx, e.dynamic, gvr, vi.Version, gvk.Version, owner); err != nil {
 			return fmt.Errorf("error migrating compositions from version %s: %w", vi.Version, err)
 		}
+	}
+
+	// Prune served versions that are no longer in use. After migration every composition is on the
+	// current version, so any OTHER non-vacuum served version that no definition references and no
+	// instance carries its label is dead weight in the CRD's spec.versions (#103) — and a stale
+	// served endpoint a client can pick that silently prunes fields written through it. Best-effort:
+	// a failure is logged and retried on the next reconcile; it never blocks the reconcile.
+	if err := e.pruneStaleServedVersions(ctx, gvk, gvr, cr.Name, cr.Namespace); err != nil {
+		log.Debug("served-version prune skipped (retried next reconcile)", "error", err.Error())
 	}
 
 	if err := status.RefreshCompositionDefinitionStatus(cr, crd, gvr, gvk, pkgFS.PackageURL()); err != nil {
