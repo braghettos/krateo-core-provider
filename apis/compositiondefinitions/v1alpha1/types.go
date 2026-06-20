@@ -3,6 +3,7 @@ package v1alpha1
 import (
 	rtv1 "github.com/krateoplatformops/provider-runtime/apis/common/v1"
 	"github.com/krateoplatformops/provider-runtime/pkg/resource"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -115,6 +116,74 @@ type CompositionDefinitionSpec struct {
 	// is local.
 	// +optional
 	Deploy *DeploymentTarget `json:"deploy,omitempty"`
+
+	// ApiRef references a RESTAction whose calls are resolved (via snowplow, under an
+	// authn-issued scoped service identity) each reconcile; results are keyed by call name
+	// under ".api" in the projection root. Shape copied from snowplow's spec.apiRef
+	// (name/namespace + inline extras).
+	// +optional
+	ApiRef *ApiReference `json:"apiRef,omitempty"`
+
+	// StatusDataTemplate declares extra fields projected onto the generated Composition
+	// CRD's status and populated by the controller each reconcile (snowplow
+	// widgetDataTemplate shape). Each entry's ${ jq } Expression is evaluated over the
+	// combined source root (built-in self/spec/status, helm, and api) and written under
+	// .status at ForPath.
+	// +optional
+	// +listType=map
+	// +listMapKey=forPath
+	StatusDataTemplate []StatusFieldMapping `json:"statusDataTemplate,omitempty"`
+}
+
+// ApiReference references a RESTAction to resolve for status projection. It mirrors
+// snowplow's spec.apiRef: a name/namespace plus an inline, free-form extras map.
+type ApiReference struct {
+	// Name of the referenced RESTAction.
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+
+	// Namespace of the referenced RESTAction.
+	// +kubebuilder:validation:MinLength=1
+	Namespace string `json:"namespace"`
+
+	// Extras are author-declared STATIC values merged into the RESTAction's jq root
+	// (snowplow spec.apiRef.extras). Input-only — they never surface in status. The
+	// controller additionally injects per-instance context (compositionId, namespace, …)
+	// which merges over these (request-wins).
+	// +optional
+	// +kubebuilder:pruning:PreserveUnknownFields
+	Extras *apiextensionsv1.JSON `json:"extras,omitempty"`
+}
+
+// StatusFieldMapping is one projected status field (snowplow widgetDataTemplate item).
+type StatusFieldMapping struct {
+	// ForPath is the dotted path under .status to write, e.g. "endpoint" or "network.host".
+	// +kubebuilder:validation:MinLength=1
+	ForPath string `json:"forPath"`
+
+	// Expression is a ${ jq } program evaluated over the projection root; a bare path is
+	// the trivial copy. Plain literals (no ${ } wrapper) are written verbatim.
+	// +kubebuilder:validation:MinLength=1
+	Expression string `json:"expression"`
+
+	// Type optionally pins the generated status property's scalar JSON-schema type. For
+	// complex (object/array) outputs use Schema or PreserveUnknownFields instead.
+	// +optional
+	// +kubebuilder:validation:Enum=string;integer;number;boolean;object;array
+	Type string `json:"type,omitempty"`
+
+	// Schema optionally supplies the full JSON-schema for a complex output (object, array,
+	// array of objects). Mutually exclusive with PreserveUnknownFields.
+	// +optional
+	// +kubebuilder:validation:Schemaless
+	// +kubebuilder:pruning:PreserveUnknownFields
+	Schema *apiextensionsv1.JSONSchemaProps `json:"schema,omitempty"`
+
+	// PreserveUnknownFields generates the status node with
+	// x-kubernetes-preserve-unknown-fields: true, retaining an arbitrary structure without
+	// pruning. Mutually exclusive with Type/Schema.
+	// +optional
+	PreserveUnknownFields bool `json:"preserveUnknownFields,omitempty"`
 }
 
 // KubernetesTargetSpec describes how to reach a remote target cluster.

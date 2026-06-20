@@ -73,6 +73,32 @@ spec:
             type: object
           spec:
             properties:
+              apiRef:
+                description: |-
+                  ApiRef references a RESTAction whose calls are resolved (via snowplow, under an
+                  authn-issued scoped service identity) each reconcile; results are keyed by call name
+                  under ".api" in the projection root. Shape copied from snowplow's spec.apiRef
+                  (name/namespace + inline extras).
+                properties:
+                  extras:
+                    description: |-
+                      Extras are author-declared STATIC values merged into the RESTAction's jq root
+                      (snowplow spec.apiRef.extras). Input-only — they never surface in status. The
+                      controller additionally injects per-instance context (compositionId, namespace, …)
+                      which merges over these (request-wins).
+                    x-kubernetes-preserve-unknown-fields: true
+                  name:
+                    description: Name of the referenced RESTAction.
+                    minLength: 1
+                    type: string
+                  namespace:
+                    description: Namespace of the referenced RESTAction.
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                - namespace
+                type: object
               chart:
                 description: rtv1.ManagedSpec `json:",inline"`
                 properties:
@@ -150,6 +176,59 @@ spec:
                     - name
                     type: object
                 type: object
+              statusDataTemplate:
+                description: |-
+                  StatusDataTemplate declares extra fields projected onto the generated Composition
+                  CRD's status and populated by the controller each reconcile (snowplow
+                  widgetDataTemplate shape). Each entry's ${ jq } Expression is evaluated over the
+                  combined source root (built-in self/spec/status, helm, and api) and written under
+                  .status at ForPath.
+                items:
+                  description: StatusFieldMapping is one projected status field (snowplow
+                    widgetDataTemplate item).
+                  properties:
+                    expression:
+                      description: |-
+                        Expression is a ${ jq } program evaluated over the projection root; a bare path is
+                        the trivial copy. Plain literals (no ${ } wrapper) are written verbatim.
+                      minLength: 1
+                      type: string
+                    forPath:
+                      description: ForPath is the dotted path under .status to write,
+                        e.g. "endpoint" or "network.host".
+                      minLength: 1
+                      type: string
+                    preserveUnknownFields:
+                      description: |-
+                        PreserveUnknownFields generates the status node with
+                        x-kubernetes-preserve-unknown-fields: true, retaining an arbitrary structure without
+                        pruning. Mutually exclusive with Type/Schema.
+                      type: boolean
+                    schema:
+                      description: |-
+                        Schema optionally supplies the full JSON-schema for a complex output (object, array,
+                        array of objects). Mutually exclusive with PreserveUnknownFields.
+                      x-kubernetes-preserve-unknown-fields: true
+                    type:
+                      description: |-
+                        Type optionally pins the generated status property's scalar JSON-schema type. For
+                        complex (object/array) outputs use Schema or PreserveUnknownFields instead.
+                      enum:
+                      - string
+                      - integer
+                      - number
+                      - boolean
+                      - object
+                      - array
+                      type: string
+                  required:
+                  - expression
+                  - forPath
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - forPath
+                x-kubernetes-list-type: map
             type: object
           status:
             description: CompositionDefinitionStatus is the status of a CompositionDefinition.
