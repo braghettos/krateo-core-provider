@@ -78,6 +78,10 @@ type DeployOptions struct {
 	JsonSchemaTemplatePath string
 	ServiceTemplatePath    string
 	JsonSchemaBytes        []byte
+	// StatusDataTemplate is the JSON-serialized statusDataTemplate (snowplow
+	// widgetDataTemplate shape) from the CompositionDefinition, rendered into the CDC
+	// ConfigMap as COMPOSITION_CONTROLLER_STATUS_DATA_TEMPLATE. Empty disables projection.
+	StatusDataTemplate string
 	// DryRunServer is used to determine if the deployment should be applied in dry-run mode. This is ignored in lookup mode
 	DryRunServer bool
 }
@@ -403,7 +407,8 @@ func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 	cm := corev1.ConfigMap{}
 	err = objects.CreateK8sObject(&cm, opts.GVR, getCDCConfigmapNN(namespacedName), opts.ConfigmapTemplatePath,
 		"composition_controller_sa_name", sa.Name,
-		"composition_controller_sa_namespace", sa.Namespace)
+		"composition_controller_sa_namespace", sa.Namespace,
+		"status_data_template", opts.StatusDataTemplate)
 	if err != nil {
 		return "", err
 	}
@@ -562,7 +567,8 @@ func Undeploy(ctx context.Context, kube client.Client, opts UndeployOptions) err
 	cm := corev1.ConfigMap{}
 	err = objects.CreateK8sObject(&cm, opts.GVR, getCDCConfigmapNN(namespacedName), opts.ConfigmapTemplatePath,
 		"composition_controller_sa_name", sa.Name,
-		"composition_controller_sa_namespace", sa.Namespace)
+		"composition_controller_sa_namespace", sa.Namespace,
+		"status_data_template", "")
 	if err != nil {
 		return err
 	}
@@ -725,7 +731,8 @@ func Lookup(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 	cm := corev1.ConfigMap{}
 	err = objects.CreateK8sObject(&cm, opts.GVR, getCDCConfigmapNN(namespacedName), opts.ConfigmapTemplatePath,
 		"composition_controller_sa_name", sa.Name,
-		"composition_controller_sa_namespace", sa.Namespace)
+		"composition_controller_sa_namespace", sa.Namespace,
+		"status_data_template", opts.StatusDataTemplate)
 	if err != nil {
 		return "", err
 	}
