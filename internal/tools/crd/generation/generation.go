@@ -96,6 +96,25 @@ func AppendVersion(crd apiextensionsv1.CustomResourceDefinition, toadd apiextens
 	return &crd, nil
 }
 
+// RemoveStaleVersions removes the named non-vacuum versions from the CRD's spec.Versions.
+// The "vacuum" storage version is NEVER removed (the apiserver forbids deleting the storage
+// version, and it preserves all instances). The caller is responsible for the prunability
+// predicate (no definition/instance references the version, and it is not the current served
+// version); this is the pure mutation. Returns whether anything was actually removed.
+func RemoveStaleVersions(crd *apiextensionsv1.CustomResourceDefinition, prune map[string]bool) bool {
+	removed := false
+	kept := make([]apiextensionsv1.CustomResourceDefinitionVersion, 0, len(crd.Spec.Versions))
+	for _, v := range crd.Spec.Versions {
+		if v.Name != "vacuum" && prune[v.Name] {
+			removed = true
+			continue
+		}
+		kept = append(kept, v)
+	}
+	crd.Spec.Versions = kept
+	return removed
+}
+
 func UpdateStatus(crd *apiextensionsv1.CustomResourceDefinition, version apiextensionsv1.CustomResourceDefinitionVersion) error {
 	if version.Schema == nil || version.Schema.OpenAPIV3Schema == nil {
 		return fmt.Errorf("CRD %s version %s schema is nil", crd.Name, version.Name)
