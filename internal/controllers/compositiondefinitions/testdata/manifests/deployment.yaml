@@ -49,3 +49,19 @@ spec:
             null
           resources:
             {}
+          volumeMounts:
+          {{- if .api_ref_name }}
+            - name: authn-serviceaccount-token
+              mountPath: /var/run/secrets/krateo.io/serviceaccount
+              readOnly: true
+          {{- end }}
+      volumes:
+      {{- if .api_ref_name }}
+        - name: authn-serviceaccount-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  audience: authn
+                  expirationSeconds: 3600
+      {{- end }}
