@@ -374,6 +374,24 @@ func (e *external) versionReferencedByAnotherDefinition(ctx context.Context, gvk
 	return false, nil
 }
 
+// statusFieldsFromSpec maps the CompositionDefinition's statusDataTemplate declarations to
+// the generation package's decoupled StatusField list (used to validate and to inject the
+// declared properties into the generated CRD's status schema).
+func statusFieldsFromSpec(cr *compositiondefinitionsv1alpha1.CompositionDefinition) []crdutils.StatusField {
+	fields := make([]crdutils.StatusField, 0, len(cr.Spec.StatusDataTemplate))
+	for i := range cr.Spec.StatusDataTemplate {
+		m := &cr.Spec.StatusDataTemplate[i]
+		fields = append(fields, crdutils.StatusField{
+			ForPath:               m.ForPath,
+			Expression:            m.Expression,
+			Type:                  m.Type,
+			Schema:                m.Schema,
+			PreserveUnknownFields: m.PreserveUnknownFields,
+		})
+	}
+	return fields
+}
+
 func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler.ExternalObservation, error) {
 	cr, ok := mg.(*compositiondefinitionsv1alpha1.CompositionDefinition)
 	if !ok {
@@ -464,6 +482,14 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 	genCRD, err := crdutils.GenerateCRD(specSchemaBytes, chartGVK)
 	if err != nil {
 		return reconciler.ExternalObservation{}, fmt.Errorf("error generating CRD: %w", err)
+	}
+
+	statusFields := statusFieldsFromSpec(cr)
+	if err := crdutils.ValidateStatusFields(statusFields); err != nil {
+		return reconciler.ExternalObservation{}, fmt.Errorf("invalid statusDataTemplate: %w", err)
+	}
+	if err := crdutils.InjectStatusFields(genCRD, statusFields); err != nil {
+		return reconciler.ExternalObservation{}, fmt.Errorf("error injecting declared status fields: %w", err)
 	}
 
 	statusChanged, err := crdutils.StatusEqual(crd, genCRD)
@@ -602,6 +628,9 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) error {
 	if crd == nil {
 		return fmt.Errorf("error generating CRD: crd is nil")
 	}
+	if err := crdutils.InjectStatusFields(crd, statusFieldsFromSpec(cr)); err != nil {
+		return fmt.Errorf("error injecting declared status fields: %w", err)
+	}
 
 	gvr, err := crdclient.ApplyOrUpdateCRD(ctx, e.kube, e.dynamic, crd)
 	if err != nil {
@@ -677,6 +706,9 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 	}
 	if crd == nil {
 		return fmt.Errorf("error generating CRD: crd is nil")
+	}
+	if err := crdutils.InjectStatusFields(crd, statusFieldsFromSpec(cr)); err != nil {
+		return fmt.Errorf("error injecting declared status fields: %w", err)
 	}
 
 	gvr, err := crdclient.ApplyOrUpdateCRD(ctx, e.kube, e.dynamic, crd)
