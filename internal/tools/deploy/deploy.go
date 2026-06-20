@@ -63,6 +63,10 @@ type UndeployOptions struct {
 	ConfigmapTemplatePath  string
 	JsonSchemaTemplatePath string
 	JsonSchemaBytes        []byte
+	// ApiRefName mirrors DeployOptions: when set, the authn ServiceAccount mapping created on
+	// deploy is removed on undeploy. AuthnNamespace is the authn operator namespace it lives in.
+	ApiRefName     string
+	AuthnNamespace string
 }
 
 type DeployOptions struct {
@@ -89,6 +93,9 @@ type DeployOptions struct {
 	ApiRefName      string
 	ApiRefNamespace string
 	ApiRefExtras    string
+	// AuthnNamespace is the authn operator namespace where the ServiceAccount allowlist
+	// mapping is created (when ApiRefName is set). Empty defaults to "krateo-system".
+	AuthnNamespace string
 	// DryRunServer is used to determine if the deployment should be applied in dry-run mode. This is ignored in lookup mode
 	DryRunServer bool
 }
@@ -394,6 +401,13 @@ func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 		return "", err
 	}
 
+	// When the CompositionDefinition declares an apiRef, register the CDC ServiceAccount in
+	// authn's allowlist so it can exchange its projected token for a service JWT.
+	err = applyAuthnServiceAccountMapping(ctx, opts.KubeClient, opts, sa.Name, sa.Namespace, &hsh, applyOpts)
+	if err != nil {
+		return "", err
+	}
+
 	jsonSchemaConfigmap := corev1.ConfigMap{}
 	err = objects.CreateK8sObject(&jsonSchemaConfigmap, opts.GVR, getJsonSchemaConfigmapNN(namespacedName), opts.JsonSchemaTemplatePath,
 		"schema", string(opts.JsonSchemaBytes),
@@ -602,6 +616,13 @@ func Undeploy(ctx context.Context, kube client.Client, opts UndeployOptions) err
 		return err
 	}
 
+	// Remove the authn allowlist mapping (no-op if absent / authn CRD not installed). Done
+	// unconditionally so it is cleaned up even if apiRef was removed before undeploy.
+	err = deleteAuthnServiceAccountMapping(ctx, opts.KubeClient, opts.AuthnNamespace, opts.Namespace, sa.Name)
+	if err != nil {
+		return err
+	}
+
 	_, err = os.Stat(opts.ServiceTemplatePath)
 	if err == nil {
 		svc := corev1.Service{}
@@ -720,6 +741,11 @@ func Lookup(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 	err = lookupRBACResources(ctx, opts.KubeClient, clusterrole, clusterrolebinding, role, rolebinding, sa, &hsh)
 	if err != nil {
 		return "", err
+	}
+
+	// Contribute the authn mapping to the digest (deterministically) so it matches Deploy.
+	if err = hashAuthnServiceAccountMapping(opts, sa.Name, &hsh); err != nil {
+		return "", fmt.Errorf("error hashing authn ServiceAccount mapping: %v", err)
 	}
 
 	jsonSchemaConfigmap := corev1.ConfigMap{}
