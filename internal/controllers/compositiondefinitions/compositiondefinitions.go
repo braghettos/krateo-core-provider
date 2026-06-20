@@ -59,7 +59,19 @@ var (
 	CDCrbacConfigFolder             = filepath.Join(os.TempDir(), "assets/cdc-rbac/")
 	JSONSchemaTemplateConfigmapPath = filepath.Join(os.TempDir(), "assets/json-schema-configmap/configmap.yaml")
 	ServiceTemplatePath             = filepath.Join(os.TempDir(), "assets/cdc-service/service.yaml")
+
+	// AuthnNamespace is the authn operator namespace where the per-composition ServiceAccount
+	// allowlist mapping is created (when a CompositionDefinition declares an apiRef). Override
+	// via COMPOSITION_AUTHN_NAMESPACE; defaults to "krateo-system".
+	AuthnNamespace = envOr("COMPOSITION_AUTHN_NAMESPACE", "krateo-system")
 )
+
+func envOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
 
 type Options struct {
 	ControllerOptions controller.Options
@@ -587,6 +599,7 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 		ApiRefName:             apiRefName(cr),
 		ApiRefNamespace:        apiRefNamespace(cr),
 		ApiRefExtras:           encodeApiRefExtras(cr),
+		AuthnNamespace:         AuthnNamespace,
 		DryRunServer:           true,
 	}
 	dig, err := deploy.Deploy(ctx, e.kube, opts)
@@ -714,6 +727,7 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) error {
 		ApiRefName:             apiRefName(cr),
 		ApiRefNamespace:        apiRefNamespace(cr),
 		ApiRefExtras:           encodeApiRefExtras(cr),
+		AuthnNamespace:         AuthnNamespace,
 	}
 
 	dig, err := deploy.Deploy(ctx, e.kube, opts)
@@ -797,6 +811,7 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 		ApiRefName:             apiRefName(cr),
 		ApiRefNamespace:        apiRefNamespace(cr),
 		ApiRefExtras:           encodeApiRefExtras(cr),
+		AuthnNamespace:         AuthnNamespace,
 	}
 
 	dig, err := deploy.Deploy(ctx, e.kube, opts)
@@ -844,6 +859,7 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 					KubeClient:             e.kube,
 					Namespace:              cr.Namespace,
 					SkipCRD:                true,
+					AuthnNamespace:         AuthnNamespace,
 				})
 				if err != nil {
 					return fmt.Errorf("error undeploying older version of dynamic controller: %w", err)
@@ -976,6 +992,7 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
 			ServiceTemplatePath:    ServiceTemplatePath,
 			ConfigmapTemplatePath:  CDCtemplateConfigmapPath,
 			JsonSchemaTemplatePath: JSONSchemaTemplateConfigmapPath,
+			AuthnNamespace:         AuthnNamespace,
 		}
 
 		err = deploy.Undeploy(ctx, e.kube, opts)
