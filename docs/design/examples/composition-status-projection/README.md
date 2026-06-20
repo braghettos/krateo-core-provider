@@ -2,12 +2,14 @@
 
 Worked manifests for [`../../composition-status-projection.md`](../../composition-status-projection.md).
 **Design draft — these reference proposed `spec` fields (`statusDataTemplate`, `apiRef`,
-`extras`) that do not exist yet.** They illustrate the design; they are not applyable today.
+`apiRef.extras`) that do not exist yet.** They illustrate the design; they are not applyable
+today.
 
-> **`extras` shape is NOT final — blocked on snowplow.** snowplow is adding `extras`
-> *within* `apiRef`; core-provider will copy that shape once released. The `spec.extras`
-> sibling used in `02-compositiondefinition.yaml` is a placeholder and will likely move
-> nested under `apiRef`.
+> **`extras` shape is settled** — copied from snowplow's shipped "inline-extras design P"
+> (2026-06-20): `apiRef.extras` is a free-form, preserve-unknown-fields map of **static**
+> author values (input-only), nested **inside `apiRef`**. The CDC injects per-instance
+> context (`compositionId`/`namespace`/…) as request-extras that merge over inline
+> (request-wins).
 
 | File | What |
 |---|---|
@@ -18,10 +20,11 @@ Worked manifests for [`../../composition-status-projection.md`](../../compositio
 
 ## Data flow (full example)
 
-1. Author declares `spec.extras` on the CompositionDefinition — `${ jq }` over the
-   Composition instance, e.g. `compositionId: ${ .metadata.uid }`.
-2. The CDC evaluates `extras` against the instance and asks **snowplow** to resolve the
-   `apiRef` RESTAction, **under snowplow's own ServiceAccount**, passing the map as `Extras`.
+1. Author declares static `apiRef.extras` on the CompositionDefinition (e.g.
+   `region: eu-west`) — snowplow's inline-extras shape, input-only.
+2. The CDC injects per-instance context (`compositionId`, `namespace`, `name`, `spec`) as
+   request-extras and asks **snowplow** to resolve the `apiRef` RESTAction **under its own
+   ServiceAccount**; snowplow merges request-extras over the inline ones (request-wins).
 3. `Extras` seeds the RESTAction's jq root; each `api[]` call's `path`/`payload` reads it
    (label-scoped kube reads + external calls). Responses merge back keyed by call name.
 4. The CDC projects the combined root (`.self`, `.helm`, `.api.*`) via `statusDataTemplate`
