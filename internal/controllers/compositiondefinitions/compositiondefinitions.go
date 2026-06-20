@@ -431,7 +431,11 @@ func (e *external) pruneStaleServedVersions(ctx context.Context, gvk schema.Grou
 	if !crdutils.RemoveStaleVersions(crd, prune) {
 		return nil
 	}
-	if err := e.kube.Update(ctx, crd); err != nil {
+	// Use kube.Apply (get-fresh-resourceVersion + retry-on-conflict), not a bare client Update:
+	// right after a new version is appended the apiserver actively churns the CRD's status
+	// (acceptedNames / per-version established conditions), so a non-retrying Update reliably loses
+	// a resourceVersion conflict and the prune silently no-ops.
+	if err := kube.Apply(ctx, e.kube, crd, kube.ApplyOptions{}); err != nil {
 		return fmt.Errorf("applying pruned CRD: %w", err)
 	}
 	e.log.Debug("Pruned stale served versions from CRD", "gvr", gvr.String(), "count", len(prune))
