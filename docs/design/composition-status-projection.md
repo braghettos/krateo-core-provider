@@ -117,7 +117,7 @@ There are exactly two kinds:
 | Kind | Resolves to | I/O / RBAC | Phase |
 |---|---|---|---|
 | **built-in** `self` (`spec`/`status` sugar), `helm` | the Composition CR / its Helm release metadata — already in the CDC's hand | none | 1 |
-| **`apiRef` → RESTAction** | result of API calls resolved **at runtime under snowplow's own SA** — kube API reads *or* external APIs | snowplow's SA; **CDC needs none** | 2 |
+| **`apiRef` → RESTAction** | result of API calls resolved **at runtime via snowplow under an authn-issued scoped service identity** — kube API reads *or* external APIs | scoped `clientconfig` (authn); **CDC needs none** | 2 |
 | `response` (RDC only) | the API GET/FINDBY body RDC already has | none | — |
 
 There is deliberately **no `resourcesRefs`**: the kube API server is an HTTP endpoint, so a
@@ -191,8 +191,9 @@ type CompositionDefinitionSpec struct {
     Chart  *ChartInfo        `json:"chart,omitempty"`
     Deploy *DeploymentTarget `json:"deploy,omitempty"`
 
-    // ApiRef references a RESTAction whose calls are resolved (under snowplow's SA, §4.3)
-    // each reconcile; results are keyed by call name under ".api" in the jq root.
+    // ApiRef references a RESTAction whose calls are resolved by snowplow under an
+    // authn-issued scoped service identity (§4.3) each reconcile; results are keyed by call
+    // name under ".api" in the jq root.
     // Shape copied from snowplow's shipped spec.apiRef (name/namespace + inline extras).
     // +optional
     ApiRef *ApiReference `json:"apiRef,omitempty"`
@@ -296,7 +297,7 @@ Rules: **`forPath` addresses object locations only** (build arrays by *returning
 normalization is exactly what `jqutil.InferType` already does (and `braghettos/plumbing
 v1.7.6` carries the gojq int-panic fix) — so the engine inherits it from `jqutil`.
 
-### 4.3 `apiRef` → RESTAction, resolved synchronously via snowplow (own SA)
+### 4.3 `apiRef` → RESTAction, resolved synchronously via snowplow (authn service identity)
 
 In-cluster and external data both come from a `RESTAction` referenced by `apiRef`. A
 `RESTAction.spec.api[]` is a list of named calls; each `endpointRef` points at a **Secret**
@@ -376,12 +377,13 @@ The RESTAction call accepts **caller context** via the resolver's existing
 
 **Two consequences to design for:**
 
-- **Security surface.** Resolving under snowplow's own (potentially broad) SA bypasses
-  per-user RBAC by design. So a composition author's RESTAction is executed with snowplow's
-  privileges. Bound this: constrain what snowplow's SA can reach and/or which RESTActions
-  are resolvable in service mode. **This is the real risk to design — more than RBAC
-  plumbing.** Note the upside: credentials live in **one** SA (snowplow), never in the N
-  CDC instances across N target clusters.
+- **Security surface — bounded by the per-service `clientconfig`.** Resolution runs under
+  the **authn-issued service identity** for the calling service (§11), not snowplow's main SA
+  and not a human user. Least privilege is just that `clientconfig`'s RBAC, provisioned and
+  centralized in authn per service — so a composition author's RESTAction is executed with a
+  *scoped* identity, not snowplow's. Credentials never live in the CDC. (The design risk is
+  therefore the **scoping policy** of that clientconfig, handled in authn, not loose SA
+  privilege.)
 - **Coupling & freshness.** This is a hard runtime dependency: CDC → snowplow on every
   reconcile with an `apiRef`. If snowplow is unavailable, those status fields go stale —
   **degrade the field, never fail the reconcile** (per-mapping error →
