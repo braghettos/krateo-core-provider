@@ -2,6 +2,7 @@ package compositiondefinitions
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -374,6 +375,29 @@ func (e *external) versionReferencedByAnotherDefinition(ctx context.Context, gvk
 	return false, nil
 }
 
+// encodeStatusDataTemplate serializes the CompositionDefinition's statusDataTemplate to the
+// engine's JSON wire format ([{forPath,expression}]) for delivery to the CDC via its
+// ConfigMap (COMPOSITION_CONTROLLER_STATUS_DATA_TEMPLATE). Empty when nothing is declared.
+func encodeStatusDataTemplate(cr *compositiondefinitionsv1alpha1.CompositionDefinition) string {
+	if len(cr.Spec.StatusDataTemplate) == 0 {
+		return ""
+	}
+	type wire struct {
+		ForPath    string `json:"forPath"`
+		Expression string `json:"expression"`
+	}
+	ws := make([]wire, 0, len(cr.Spec.StatusDataTemplate))
+	for i := range cr.Spec.StatusDataTemplate {
+		m := &cr.Spec.StatusDataTemplate[i]
+		ws = append(ws, wire{ForPath: m.ForPath, Expression: m.Expression})
+	}
+	b, err := json.Marshal(ws)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
 // statusFieldsFromSpec maps the CompositionDefinition's statusDataTemplate declarations to
 // the generation package's decoupled StatusField list (used to validate and to inject the
 // declared properties into the generated CRD's status schema).
@@ -531,6 +555,7 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 		JsonSchemaBytes:        specSchemaBytes,
 		ServiceTemplatePath:    ServiceTemplatePath,
 		DynClient:              e.dynamic,
+		StatusDataTemplate:     encodeStatusDataTemplate(cr),
 		DryRunServer:           true,
 	}
 	dig, err := deploy.Deploy(ctx, e.kube, opts)
@@ -654,6 +679,7 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) error {
 		ServiceTemplatePath:    ServiceTemplatePath,
 		JsonSchemaBytes:        specSchemaBytes,
 		DynClient:              e.dynamic,
+		StatusDataTemplate:     encodeStatusDataTemplate(cr),
 	}
 
 	dig, err := deploy.Deploy(ctx, e.kube, opts)
@@ -733,6 +759,7 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 		ServiceTemplatePath:    ServiceTemplatePath,
 		JsonSchemaBytes:        specSchemaBytes,
 		DynClient:              e.dynamic,
+		StatusDataTemplate:     encodeStatusDataTemplate(cr),
 	}
 
 	dig, err := deploy.Deploy(ctx, e.kube, opts)
