@@ -1,4 +1,4 @@
-# Enabling the `apiRef` status source (authn allowlist)
+# The `apiRef` status source (authn allowlist)
 
 When a `CompositionDefinition` declares `spec.apiRef`, the composition-dynamic-controller
 (CDC) resolves that RESTAction via snowplow **under its own identity** each reconcile, and
@@ -10,9 +10,14 @@ only performs that exchange for ServiceAccounts that are on its **allowlist** �
 a `serviceaccount.authn.krateo.io/ServiceAccount` mapping exists **in the authn operator
 namespace** (e.g. `krateo-system`).
 
-The token volume is mounted automatically by core-provider when `apiRef` is set
-(`/var/run/secrets/krateo.io/serviceaccount/token`). What is **not** automatic (pending a
-decision, see below) is the allowlist mapping.
+Both pieces are **provisioned automatically by core-provider** when `apiRef` is set:
+
+1. the projected token volume on the CDC Deployment
+   (`/var/run/secrets/krateo.io/serviceaccount/token`); and
+2. the authn allowlist mapping (this document).
+
+The only step left to the platform operator is binding RBAC to the issued group (see below) —
+authn never authors RBAC.
 
 ## The per-composition ServiceAccount
 
@@ -25,58 +30,58 @@ namespace: apps
 name:      fireworksapps-v1-0-0
 ```
 
-## The allowlist mapping (sample)
+## The allowlist mapping (auto-created)
 
-Create this in the **authn operator namespace** (where authn lists mappings), with
-`serviceAccountRef` pointing at the composition's CDC SA:
+When `apiRef` is set, core-provider creates this in the authn operator namespace
+(`COMPOSITION_AUTHN_NAMESPACE`, default `krateo-system`) and deletes it on undeploy:
 
 ```yaml
 apiVersion: serviceaccount.authn.krateo.io/v1alpha1
 kind: ServiceAccount
 metadata:
-  name: cdc-fireworksapps-v1-0-0          # becomes the issued identity's username
-  namespace: krateo-system                # MUST be the authn operator namespace
+  name: cdc-apps-fireworksapps-v1-0-0       # cdc-<compositionNamespace>-<resource>-<apiVersion>
+  namespace: krateo-system                  # the authn operator namespace
 spec:
   serviceAccountRef:
-    namespace: apps                        # the composition's namespace
-    name: fireworksapps-v1-0-0             # <resource>-<apiVersion>
+    namespace: apps                          # the composition's namespace
+    name: fireworksapps-v1-0-0               # <resource>-<apiVersion>
   groups:
-    - krateo:composition-dynamic-controller   # -> issued cert O= -> standard k8s RBAC
-  displayName: "CDC (fireworksapps v1-0-0)"
+    - krateo:cdc:fireworksapps-v1-0-0        # krateo:cdc:<resource>-<apiVersion>
+  displayName: "CDC (apps/fireworksapps-v1-0-0)"
 ```
 
+This requires core-provider to have manage rights on
+`serviceaccounts.serviceaccount.authn.krateo.io` (granted by the core-provider chart
+ClusterRole) and to know the authn namespace (`COMPOSITION_AUTHN_NAMESPACE`).
+
+## Binding RBAC to the issued identity (operator step)
+
 `spec.groups` become the issued clientconfig certificate's `O=` (organization), so **standard
-Kubernetes RBAC bound to those groups** scopes what the resolved RESTAction may read. Bind a
-`ClusterRole` to the group with a normal `ClusterRoleBinding` (authn never authors RBAC):
+Kubernetes RBAC bound to that group** scopes what the resolved RESTAction may read. The group
+is **per composition** — `krateo:cdc:<resource>-<apiVersion>` — so each composition type can be
+granted exactly the reads its RESTAction performs:
 
 ```yaml
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: krateo-cdc-restaction-read
+  name: krateo-cdc-fireworksapps-restaction-read
 subjects:
   - kind: Group
-    name: krateo:composition-dynamic-controller
+    name: krateo:cdc:fireworksapps-v1-0-0
     apiGroup: rbac.authorization.k8s.io
 roleRef:
   kind: ClusterRole
-  name: krateo-cdc-restaction-read         # grants the reads the RESTAction performs
+  name: krateo-cdc-fireworksapps-restaction-read   # grants the reads the RESTAction performs
   apiGroup: rbac.authorization.k8s.io
 ```
 
-## Open decision: who creates the mapping?
+## Configuration summary
 
-Because the CDC SA is **dynamic** (one per composition), a static sample does not scale. Two
-options:
-
-1. **Manual / platform-managed** — the operator (or a higher-level controller) creates the
-   mapping. core-provider stays out of authn's namespace. Simple, explicit, no new cross-
-   namespace RBAC for core-provider.
-2. **Auto-provisioned by core-provider** — when `apiRef` is set, core-provider also creates
-   the mapping in the authn operator namespace (and deletes it on undeploy). Requires:
-   core-provider config for the authn namespace, RBAC to write
-   `serviceaccounts.serviceaccount.authn.krateo.io` there, and a **fixed group convention**
-   (the authn design lists group conventions as still open).
-
-This document uses `krateo:composition-dynamic-controller` as a placeholder group; the actual
-convention is a platform decision.
+| Setting | Where | Default |
+| --- | --- | --- |
+| authn operator namespace | `COMPOSITION_AUTHN_NAMESPACE` (core-provider) | `krateo-system` |
+| token audience | CDC Deployment projected volume | `authn` |
+| token path | CDC env `COMPOSITION_CONTROLLER_SERVICEACCOUNT_TOKEN_PATH` | `/var/run/secrets/krateo.io/serviceaccount/token` |
+| snowplow / authn URLs | CDC env `URL_SNOWPLOW` / `URL_AUTHN` | in-cluster service DNS |
+| issued group | derived | `krateo:cdc:<resource>-<apiVersion>` |
