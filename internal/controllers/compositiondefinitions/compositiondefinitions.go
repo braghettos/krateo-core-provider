@@ -387,58 +387,83 @@ func (e *external) versionReferencedByAnotherDefinition(ctx context.Context, gvk
 	return false, nil
 }
 
-// pruneStaleServedVersions removes from the generated CRD any served version that is no longer in
-// use: not the current version (gvk.Version), not the "vacuum" storage version, not referenced by
-// any OTHER CompositionDefinition, and not carried by any Composition instance's
-// krateo.io/composition-version label. Without it every version hop leaves its served version in
-// spec.versions forever (#103) — dead weight, and a stale served endpoint a client can pick that
-// silently prunes fields written through it. Uses kube.Update (not ApplyOrUpdateCRD, which is
-// append-only) to actually remove versions. Best-effort: the caller logs and retries on the next
-// reconcile. The current version and vacuum are always kept, so the CRD always has a served
-// version and its storage version.
-func (e *external) pruneStaleServedVersions(ctx context.Context, gvk schema.GroupVersionKind, gvr schema.GroupVersionResource, selfName, selfNamespace string) error {
+// prunableServedVersions inspects the live CRD and returns the served versions that are safe to
+// prune: not the current version (gvk.Version), not "vacuum" (the storage version), not referenced
+// by any OTHER CompositionDefinition, and with no Composition carrying their
+// krateo.io/composition-version label. SHARED by Observe (to report not-up-to-date so Update
+// re-runs the prune to completion) and pruneStaleServedVersions — using the SAME predicate for the
+// drive condition and the actual prune is what prevents an Observe<->Update ping-pong. `kept` is the
+// per-version keep reasons (logging only).
+func (e *external) prunableServedVersions(ctx context.Context, gvk schema.GroupVersionKind, gvr schema.GroupVersionResource, selfName, selfNamespace string) (prunable, kept []string, err error) {
 	crd, err := crdclient.Get(ctx, e.kube, gvr.GroupResource())
 	if err != nil {
-		return fmt.Errorf("fetching CRD for prune: %w", err)
+		return nil, nil, fmt.Errorf("fetching CRD: %w", err)
 	}
-	prune := map[string]bool{}
+	if crd == nil {
+		return nil, nil, nil
+	}
 	for _, v := range crd.Spec.Versions {
 		if v.Name == "vacuum" || v.Name == gvk.Version {
 			continue // never the storage version or the current served version
 		}
-		referenced, err := e.versionReferencedByAnotherDefinition(ctx, schema.GroupVersionKind{
+		referenced, refErr := e.versionReferencedByAnotherDefinition(ctx, schema.GroupVersionKind{
 			Group: gvk.Group, Kind: gvk.Kind, Version: v.Name,
 		}, selfName, selfNamespace)
-		if err != nil {
-			return fmt.Errorf("checking references for version %s: %w", v.Name, err)
+		if refErr != nil {
+			return nil, nil, fmt.Errorf("checking references for version %s: %w", v.Name, refErr)
 		}
 		if referenced {
+			kept = append(kept, v.Name+":referenced")
 			continue // another definition is still on this version
 		}
-		insts, err := getters.GetCompositionsByVersionLabel(ctx, e.dynamic,
+		insts, listErr := getters.GetCompositionsByVersionLabel(ctx, e.dynamic,
 			schema.GroupVersionResource{Group: gvr.Group, Version: v.Name, Resource: gvr.Resource}, v.Name)
-		if err != nil {
-			return fmt.Errorf("listing instances for version %s: %w", v.Name, err)
+		if listErr != nil {
+			return nil, nil, fmt.Errorf("listing instances for version %s: %w", v.Name, listErr)
 		}
 		if insts != nil && len(insts.Items) > 0 {
+			kept = append(kept, fmt.Sprintf("%s:instances=%d", v.Name, len(insts.Items)))
 			continue // an instance still carries this version's label
 		}
-		prune[v.Name] = true
+		prunable = append(prunable, v.Name)
 	}
-	if len(prune) == 0 {
+	return prunable, kept, nil
+}
+
+// pruneStaleServedVersions removes the prune-eligible served versions (per prunableServedVersions)
+// from the generated CRD, so a CRD does not accumulate every version hop's served version forever
+// (#103) — dead weight, and a stale served endpoint a client can pick that silently prunes fields
+// written through it. The current version and vacuum (storage) are always kept. Applied via
+// kube.Apply (get-fresh-resourceVersion + retry-on-conflict), not a bare client Update, because
+// right after a new version is appended the apiserver churns the CRD status (acceptedNames /
+// per-version established conditions) and a non-retrying Update would lose the resourceVersion race.
+// Driven to completion by the matching check in Observe.
+func (e *external) pruneStaleServedVersions(ctx context.Context, gvk schema.GroupVersionKind, gvr schema.GroupVersionResource, selfName, selfNamespace string) error {
+	prunable, kept, err := e.prunableServedVersions(ctx, gvk, gvr, selfName, selfNamespace)
+	if err != nil {
+		return err
+	}
+	// INFO (not Debug) so the prune decision is visible in the engine's default log level (#103).
+	e.log.Info("served-version prune evaluation", "gvr", gvr.String(), "current", gvk.Version,
+		"prunable", prunable, "kept", kept)
+	if len(prunable) == 0 {
 		return nil
 	}
-	if !crdutils.RemoveStaleVersions(crd, prune) {
+	crd, err := crdclient.Get(ctx, e.kube, gvr.GroupResource())
+	if err != nil {
+		return fmt.Errorf("fetching CRD for prune: %w", err)
+	}
+	pruneSet := map[string]bool{}
+	for _, v := range prunable {
+		pruneSet[v] = true
+	}
+	if !crdutils.RemoveStaleVersions(crd, pruneSet) {
 		return nil
 	}
-	// Use kube.Apply (get-fresh-resourceVersion + retry-on-conflict), not a bare client Update:
-	// right after a new version is appended the apiserver actively churns the CRD's status
-	// (acceptedNames / per-version established conditions), so a non-retrying Update reliably loses
-	// a resourceVersion conflict and the prune silently no-ops.
 	if err := kube.Apply(ctx, e.kube, crd, kube.ApplyOptions{}); err != nil {
 		return fmt.Errorf("applying pruned CRD: %w", err)
 	}
-	e.log.Debug("Pruned stale served versions from CRD", "gvr", gvr.String(), "count", len(prune))
+	e.log.Info("Pruned stale served versions from CRD", "gvr", gvr.String(), "pruned", prunable)
 	return nil
 }
 
@@ -708,6 +733,22 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 		}
 	}
 
+	// Drive served-version pruning to completion: if the live CRD still carries a prune-eligible
+	// served version (the SAME predicate pruneStaleServedVersions uses), report not-up-to-date so
+	// Update re-runs and removes it. Without this the prune is one-shot — Observe goes up-to-date
+	// after migration completes (its gates key off stale COMPOSITIONS, status hash and digest, never
+	// the set of stale served VERSIONS) before Update ever prunes, so stale served versions would
+	// accumulate forever (#103). Same predicate on both sides => no Observe<->Update ping-pong.
+	if prunable, _, perr := e.prunableServedVersions(ctx, chartGVK, gvr, cr.Name, cr.Namespace); perr != nil {
+		return reconciler.ExternalObservation{}, fmt.Errorf("error checking prunable served versions: %w", perr)
+	} else if len(prunable) > 0 {
+		log.Debug("Stale served versions pending prune", "versions", prunable)
+		return reconciler.ExternalObservation{
+			ResourceExists:   true,
+			ResourceUpToDate: false,
+		}, nil
+	}
+
 	if err := status.RefreshCompositionDefinitionStatus(cr, crd, gvr, chartGVK, pkg.PackageURL()); err != nil {
 		return reconciler.ExternalObservation{}, fmt.Errorf("error refreshing CompositionDefinition status: %w", err)
 	}
@@ -952,7 +993,7 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 	// served endpoint a client can pick that silently prunes fields written through it. Best-effort:
 	// a failure is logged and retried on the next reconcile; it never blocks the reconcile.
 	if err := e.pruneStaleServedVersions(ctx, gvk, gvr, cr.Name, cr.Namespace); err != nil {
-		log.Debug("served-version prune skipped (retried next reconcile)", "error", err.Error())
+		log.Info("served-version prune failed (Observe will re-drive)", "error", err.Error())
 	}
 
 	if err := status.RefreshCompositionDefinitionStatus(cr, crd, gvr, gvk, pkgFS.PackageURL()); err != nil {
