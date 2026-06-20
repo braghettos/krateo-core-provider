@@ -193,20 +193,9 @@ type CompositionDefinitionSpec struct {
 
     // ApiRef references a RESTAction whose calls are resolved (under snowplow's SA, §4.3)
     // each reconcile; results are keyed by call name under ".api" in the jq root.
+    // Shape copied from snowplow's shipped spec.apiRef (name/namespace + inline extras).
     // +optional
-    ApiRef *Reference `json:"apiRef,omitempty"`
-
-    // Extras is author-declared context that seeds the RESTAction's jq root (the resolver's
-    // Extras hook, §4.3). Each value is a ${ jq } expression evaluated against the
-    // Composition instance each reconcile (or a literal); the CDC builds the map and passes
-    // it to snowplow.
-    //
-    // SHAPE/PLACEMENT PENDING SNOWPLOW (do not finalise): snowplow is adding `extras`
-    // *within* `apiRef`. core-provider should COPY that shape once released — i.e. extras
-    // will most likely live nested under ApiRef, not as this sibling field. Shown here as a
-    // sibling only as a placeholder. (§11)
-    // +optional
-    Extras map[string]string `json:"extras,omitempty"`
+    ApiRef *ApiReference `json:"apiRef,omitempty"`
 
     // StatusDataTemplate declares the projected status fields (snowplow widgetDataTemplate
     // shape). Each is evaluated over the combined source root and written under .status.
@@ -239,6 +228,24 @@ type StatusFieldMapping struct {
     // for dynamic shapes. Mutually exclusive with Type/Schema.
     // +optional
     PreserveUnknownFields bool `json:"preserveUnknownFields,omitempty"`
+}
+
+// ApiReference copies snowplow's shipped spec.apiRef shape (inline-extras design P):
+// name/namespace of the RESTAction + an inline, free-form `extras` map.
+type ApiReference struct {
+    // +required
+    Name string `json:"name"`
+    // +required
+    Namespace string `json:"namespace"`
+
+    // Extras are author-declared STATIC values merged into the RESTAction's jq root (snowplow
+    // spec.apiRef.extras, read via NestedMap(obj,"spec","apiRef","extras")). Free-form — the
+    // generated CRD marks this x-kubernetes-preserve-unknown-fields. They are INPUT-ONLY
+    // (never surface in status). The CDC additionally injects per-instance context as the
+    // "request extras" equivalent, which MERGE OVER these inline values (request-wins, §4.3).
+    // +optional
+    // +kubebuilder:pruning:PreserveUnknownFields
+    Extras *apiextensionsv1.JSON `json:"extras,omitempty"`
 }
 ```
 
@@ -333,33 +340,38 @@ service-to-service entrypoint in snowplow**:
   (`apiref.Resolve` → `restactions.Resolve`): `Extras` seeds the jq root that each call's
   `path`/`payload`/`headers`/`filter` is evaluated against (`restactions/api/resolve.go:80`).
 
-  **Extras are author-declared** — the author decides what the RESTAction receives. Each
-  value is a `${ jq }` expression evaluated against the **Composition instance** (or a
-  literal); the CDC builds the map per reconcile and passes it to snowplow.
+  **Extras have two layers, copying snowplow's shipped "inline-extras design P":**
 
-  > **Pending snowplow (do not finalise the shape).** snowplow is adding `extras` *within*
-  > `apiRef`; core-provider will **copy that shape** once released rather than invent its
-  > own. The `spec.extras` sibling shown below is a placeholder — expect it to move nested
-  > under `apiRef`. (§11)
+  1. **Inline `apiRef.extras`** — author-declared **static** values on the
+     `CompositionDefinition` (snowplow `spec.apiRef.extras`; a free-form,
+     preserve-unknown-fields map). For fixed config: `region: eu-west`, a constant
+     namespace, a tier. **Input-only** (never surface in status).
+  2. **CDC-injected per-instance context** — the CDC supplies the dynamic identity of the
+     reconciled Composition (`compositionId`, `namespace`, `name`, `spec`) as the
+     **request-extras** equivalent (snowplow's `?extras=` query param). These **merge over**
+     the inline map (**request-wins**, exactly snowplow's merge order).
 
-  This drives e.g. a **label-scoped kube-API LIST** with no hard-coded (chart-templated)
-  names:
+  The combined map seeds the RESTAction's jq root, so calls read both — a **label-scoped
+  kube-API LIST** uses the CDC-supplied identity with no hard-coded (chart-templated) names,
+  while the author's static `region` is also available:
 
   ```yaml
-  # on the CompositionDefinition, next to apiRef:
-  extras:
-    compositionId: ${ .metadata.uid }
-    namespace:     ${ .metadata.namespace }
-    region:        eu-west                 # a literal
-  # in the RESTAction, the calls read those extras:
+  # CompositionDefinition — inline static extras nested in apiRef:
+  apiRef:
+    name: fireworksapp-status
+    namespace: krateo-system
+    extras:
+      region: eu-west                      # static author default
+  # in the RESTAction, calls read the merged root (.region inline + .compositionId/.namespace from the CDC):
   api:
     - name: deploys
       path: ${ "/apis/apps/v1/namespaces/\(.namespace)/deployments?labelSelector=krateo.io/composition-id=\(.compositionId)" }
-      endpointRef: { name: kube-local, namespace: demo-system }
+      endpointRef: { name: kube-local, namespace: krateo-system }
   ```
 
   (`apiref.Resolve` returns the in-memory `ra.Status` — it persists nothing, consistent
-  with §3.3.)
+  with §3.3. The CDC injecting instance identity mirrors how snowplow's frontend passes
+  per-request context via `?extras=`.)
 
 **Two consequences to design for:**
 
@@ -446,11 +458,14 @@ resolved := map[string]any{
                            "version": pkg.Version, "status": rel.Info.Status.String()},
 }
 if cd.Spec.ApiRef != nil {                                  // Phase 2
-    extras := evalExtras(cd.Spec.Extras, mg)              // author-declared ${ jq } over the instance
-    api, err := snowplow.Resolve(ctx, cd.Spec.ApiRef, extras)   // own-SA service call; Extras hook
+    // request-extras = per-instance context, merged OVER the inline apiRef.extras by snowplow
+    reqExtras := map[string]any{
+        "compositionId": mg.GetUID(), "namespace": mg.GetNamespace(),
+        "name": mg.GetName(), "spec": mg.Object["spec"],
+    }
+    api, err := snowplow.Resolve(ctx, cd.Spec.ApiRef, reqExtras)  // own-SA call; inline extras come from the RESTAction-side apiRef
     if err == nil { resolved["api"] = api } else { /* degrade, set ReconcileError */ }
 }
-// evalExtras: for each k -> v, jqutil.Eval(v) over mg if v is ${…}, else the literal.
 _ = statusprojection.Project(mg, resolved, mappings)        // "self"/"spec"/"status" from mg
 statusprojection.SetObservedGeneration(mg)
 _, err = tools.UpdateStatus(ctx, mg, tools.UpdateOptions{Pluralizer: h.pluralizer, DynamicClient: h.dynamicClient})
@@ -550,10 +565,12 @@ synced with upstream and all forks pin `braghettos/plumbing v1.7.6` (§ alignmen
 - **Versioning interaction**: behaviour of projected fields across the full/parallel/
   selective migration patterns (mappings are per-`CompositionDefinition`-version → ride the
   existing per-version status stamping; needs an explicit test).
-- **Extras shape — BLOCKED on snowplow.** snowplow is adding `extras` *within* `apiRef`;
-  core-provider will copy that exact shape once released (do not finalise our own
-  `spec.extras` placement until then). Open sub-question once it lands: do the `${ jq }`
-  evaluate against the Composition instance (`self`) only, or also `.helm`? Lean `self`.
+- **Extras shape — RESOLVED (snowplow shipped, 2026-06-20).** Copied snowplow's
+  "inline-extras design P": `apiRef.extras` is a free-form, preserve-unknown-fields map of
+  **static** author values (input-only); the CDC injects per-instance context
+  (`compositionId`/`namespace`/…) as **request-extras** that merge over inline (request-wins).
+  Remaining sub-question: the exact set of instance-context keys the CDC auto-injects (and
+  whether `.spec`/`.helm` are included).
 
 ---
 
@@ -573,12 +590,13 @@ metadata: { name: fireworksapp, namespace: krateo-system }
 spec:
   chart: { url: oci://registry.krateo.io/charts/fireworksapp, version: 1.2.0 }
 
-  apiRef: { name: fireworksapp-status, namespace: krateo-system }
-
-  extras:                                       # author-declared, ${ jq } over the instance
-    compositionId: ${ .metadata.uid }
-    namespace:     ${ .metadata.namespace }
-    region:        eu-west                      # a literal
+  apiRef:                                       # snowplow shape: name/namespace + inline extras
+    name: fireworksapp-status
+    namespace: krateo-system
+    extras:                                     # author-declared STATIC values (input-only)
+      region: eu-west
+  # the CDC also injects { compositionId, namespace, name, spec } as request-extras,
+  # merged OVER apiRef.extras (request-wins) — the RESTAction reads both
 
   statusDataTemplate:
     # built-ins (.self/.helm) — Phase 1, no I/O
@@ -652,10 +670,11 @@ spec:                                           # == chart values (== .self.spec
   replicas: 3
 ```
 
-**(4) Resolution at reconcile.** The CDC evaluates `spec.extras` against the instance →
-`{ compositionId: "9b1c-…", namespace: "apps", region: "eu-west" }`, passes it to snowplow
-(own SA). The RESTAction's jq root becomes those extras; each call merges its response in by
-name. The combined `resolved` root the engine sees:
+**(4) Resolution at reconcile.** The CDC injects per-instance request-extras
+`{ compositionId: "9b1c-…", namespace: "apps", name: "demo", spec: {…} }`, which snowplow
+merges over the inline `apiRef.extras` (`{ region: "eu-west" }`) → the RESTAction's jq root
+`{ region, compositionId, namespace, name, spec }`; each call then merges its response in by
+name. Resolution runs under snowplow's own SA. The combined `resolved` root the engine sees:
 
 ```jsonc
 { "self": { "spec": { "service": { "host": "demo.example.com", "port": 8080 }, "replicas": 3 } },

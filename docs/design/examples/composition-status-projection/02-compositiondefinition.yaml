@@ -12,20 +12,17 @@ spec:
 
   # The RESTAction whose calls are resolved at reconcile, under snowplow's own SA.
   # Results are keyed by call name under ".api" in the jq root (.api.svc, .api.deploys, …).
+  # Shape copied from snowplow's shipped spec.apiRef (name/namespace + inline extras).
   apiRef:
     name: fireworksapp-status
     namespace: krateo-system
-
-  # Author-declared context that seeds the RESTAction's jq root.
-  # Each value is a ${ jq } expression over the Composition INSTANCE, or a literal.
-  # The CDC evaluates these per reconcile and passes the map to snowplow as Extras.
-  #
-  # SHAPE NOT FINAL — blocked on snowplow: snowplow is adding `extras` *within* apiRef;
-  # core-provider will copy that shape. This sibling placement is a placeholder.
-  extras:
-    compositionId: ${ .metadata.uid }
-    namespace:     ${ .metadata.namespace }
-    region:        eu-west                   # a literal
+    # Inline extras: author-declared STATIC values, nested in apiRef (snowplow
+    # inline-extras design P; free-form / preserve-unknown-fields, input-only).
+    # The CDC additionally injects per-instance context (compositionId, namespace, name,
+    # spec) as "request extras" that MERGE OVER these inline values (request-wins) — so the
+    # RESTAction's calls can read both .region (here) and .compositionId/.namespace (CDC).
+    extras:
+      region: eu-west
 
   statusDataTemplate:
     # --- built-ins (.self / .helm), no I/O ---
