@@ -23,8 +23,9 @@
 2. **Two source kinds, no more:**
    - **built-ins** — `self` (the Composition CR; `spec`/`status` are sugar) and `helm`
      (release metadata). In-hand, zero I/O, zero new RBAC.
-   - **`apiRef` → RESTAction**, resolved **synchronously at reconcile under snowplow's own
-     ServiceAccount**. Because the Kubernetes API server is just another HTTP endpoint, a
+   - **`apiRef` → RESTAction**, resolved **synchronously at reconcile by snowplow under an
+     authn-issued, scoped per-service identity** (k8s intra-service auth, §11). Because the
+     Kubernetes API server is just another HTTP endpoint, a
      RESTAction covers **both** in-cluster reads (a Service's LB IP, a Deployment's
      `readyReplicas`) **and** external APIs — so there is **no separate `resourcesRefs`**.
 3. **Projection = the snowplow convention.** `spec.statusDataTemplate[]` of
@@ -466,7 +467,7 @@ if cd.Spec.ApiRef != nil {                                  // Phase 2
         "compositionId": mg.GetUID(), "namespace": mg.GetNamespace(),
         "name": mg.GetName(), "spec": mg.Object["spec"],
     }
-    api, err := snowplow.Resolve(ctx, cd.Spec.ApiRef, reqExtras)  // own-SA call; inline extras come from the RESTAction-side apiRef
+    api, err := snowplow.Resolve(ctx, cd.Spec.ApiRef, reqExtras)  // authn-authed /call; inline extras come from the RESTAction-side apiRef
     if err == nil { resolved["api"] = api } else { /* degrade, set ReconcileError */ }
 }
 _ = statusprojection.Project(mg, resolved, mappings)        // "self"/"spec"/"status" from mg
@@ -715,7 +716,8 @@ spec:                                           # == chart values (== .self.spec
 `{ compositionId: "9b1c-…", namespace: "apps", name: "demo", spec: {…} }`, which snowplow
 merges over the inline `apiRef.extras` (`{ region: "eu-west" }`) → the RESTAction's jq root
 `{ region, compositionId, namespace, name, spec }`; each call then merges its response in by
-name. Resolution runs under snowplow's own SA. The combined `resolved` root the engine sees:
+name. Resolution runs under the authn-issued scoped service identity. The combined
+`resolved` root the engine sees:
 
 ```jsonc
 { "self": { "spec": { "service": { "host": "demo.example.com", "port": 8080 }, "replicas": 3 } },
