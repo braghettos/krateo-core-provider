@@ -439,7 +439,8 @@ func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 		opts.GVR,
 		getCDCDeploymentNN(namespacedName),
 		opts.DeploymentTemplatePath,
-		"serviceAccountName", sa.Name)
+		"serviceAccountName", sa.Name,
+		"api_ref_name", opts.ApiRefName)
 	if err != nil {
 		return "", err
 	}
@@ -562,7 +563,10 @@ func Undeploy(ctx context.Context, kube client.Client, opts UndeployOptions) err
 		opts.GVR,
 		getCDCDeploymentNN(namespacedName),
 		opts.DeploymentTemplatePath,
-		"serviceAccountName", sa.Name)
+		"serviceAccountName", sa.Name,
+		// Undeploy renders the Deployment only to delete it by name; the token volume is
+		// irrelevant here.
+		"api_ref_name", "")
 	if err != nil {
 		return err
 	}
@@ -774,7 +778,8 @@ func Lookup(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 		opts.GVR,
 		getCDCDeploymentNN(namespacedName),
 		opts.DeploymentTemplatePath,
-		"serviceAccountName", sa.Name)
+		"serviceAccountName", sa.Name,
+		"api_ref_name", opts.ApiRefName)
 	if err != nil {
 		return "", err
 	}
