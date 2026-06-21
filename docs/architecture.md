@@ -44,7 +44,13 @@ Two CRDs live in this group:
 
 - **`CompositionDefinition`** (namespaced, `types.go:244`): `spec.chart` (`ChartInfo`: `url`,
   `version`, `repo`, `insecureSkipVerifyTLS`, optional `credentials`, `types.go:35`) and optional
-  `spec.deploy.targetRef` selecting a remote target (`types.go:101-118`). Its `status`
+  `spec.deploy.targetRef` selecting a remote target (`types.go:101-118`). Since 2.3.0 it also
+  carries two optional **status-projection** fields: `spec.statusDataTemplate`
+  (`[]StatusFieldMapping`, `types.go:135`) — snowplow `widgetDataTemplate`-shaped
+  `{forPath, expression, type?, schema?, preserveUnknownFields?}` entries whose `${ jq }`
+  expressions are written under `.status` at `forPath` — and `spec.apiRef` (`ApiReference`,
+  `types.go:125`) — a `name`/`namespace` reference to a `RESTAction` plus inline static `extras`,
+  mirroring snowplow's `spec.apiRef`. Its `status`
   (`types.go:204`) carries the conditioned status, last-applied `apiVersion`/`kind`/`resource`, a
   `managed.versionInfo` list of served CRD versions, the chart `packageUrl`, a `target` block
   (mode/connection/version), and a **`digest`** of the rendered CDC resources.
@@ -88,14 +94,35 @@ The controller is thin; the work is in these packages:
   status schema into a CRD via `plumbing/crdgen` (`generation.go:123`, `:205`). `AppendVersion`
   (`:34`) adds a new served version to an existing CRD and injects a permissive **`vacuum`** storage
   version for lossless multi-version storage (`:54-85`). `StatusEqual` (`:135`) compares only the
-  status sub-schema by FNV hash.
+  status sub-schema by FNV hash. `statusfields.go` extends the generated status schema from the
+  `CompositionDefinition`'s `statusDataTemplate`: `ValidateStatusFields` checks each declared
+  field (non-empty `forPath`, no collision with the reserved baseline status keys, no duplicates,
+  type/schema/`preserveUnknownFields` mutual exclusion, parseable `${ jq }`), and
+  `InjectStatusFields` writes each declared `forPath` as a (possibly nested) property under the
+  status schema of **every** version, so the CDC's projected writes survive status-subresource
+  pruning (`statusfields.go:39`, `:77`). The controller calls both around `GenerateCRD` on
+  Create/Update and re-injects on Observe (`compositiondefinitions.go:645-654`, `:815`, `:899`).
 - **`crd`** (`crd.go`): `ApplyOrUpdateCRD` (`crd.go:143`) creates the CRD if absent, else
   status-only-updates, else appends a version; it always sets **`None` conversion**
   (`setNoneConversion`, `:247`) and waits for the CRD to be Established.
 - **`deploy`** (`deploy.go`): `Deploy` (`deploy.go:305`) renders and applies the CDC's RBAC, the two
   ConfigMaps, the Deployment and optional Service, hashing every object into a single FNV **digest**;
   `Lookup` (`:618`) recomputes that digest from the live cluster; `Undeploy` (`:490`) tears it down.
-  Resources are named `<plural>-<version>-controller` etc. (`resourceNamer`, `:77`).
+  Resources are named `<plural>-<version>-controller` etc. (`resourceNamer`, `:77`). The
+  status-projection config rides to the CDC through its config ConfigMap as
+  `COMPOSITION_CONTROLLER_STATUS_DATA_TEMPLATE` and `COMPOSITION_CONTROLLER_API_REF_NAME` /
+  `_NAMESPACE` / `_EXTRAS` (`configmap.yaml`, encoded at `compositiondefinitions.go:492`, `:514`).
+  When `apiRef` is declared, the Deployment additionally mounts a projected `authn`-audience
+  ServiceAccount token at `/var/run/secrets/krateo.io/serviceaccount/token` (1h expiry, gated on
+  `api_ref_name`, `deployment.yaml:53-67`), and `authnmapping.go` auto-provisions an authn
+  allowlist mapping (`serviceaccount.authn.krateo.io/ServiceAccount`) in the authn operator
+  namespace (`AuthnNamespace`, env `COMPOSITION_AUTHN_NAMESPACE`, default `krateo-system`) that
+  grants the per-composition group `krateo:cdc:<resource>-<apiVersion>`; the mapping is hashed into
+  the digest and deleted on `Undeploy` (`authnmapping.go:58`, `:108`, `deploy.go:621`). At runtime
+  the CDC presents that token to authn to obtain a service JWT, resolves the `RESTAction` via
+  snowplow under that identity each reconcile, and exposes the result under `.api` for
+  `statusDataTemplate` to read — so the issued group, scoped by ordinary Kubernetes RBAC, bounds
+  what the projection may read. See the how-to `docs/how-to/apiref-status-projection-authn.md`.
 - **`clusterkube`** (`clusterkube.go`): resolves the local-or-remote target clients from a
   `KubernetesTarget` + kubeconfig Secret, re-read every reconcile so external rotation is picked up
   (`Remote`, `clusterkube.go:47`).

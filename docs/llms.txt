@@ -29,11 +29,26 @@ If something isn't in these docs, read the source at the same tag — don't gues
 ## Internals & runtime
 
 - [behavior.md](behavior.md): the reconcile lifecycle (Observe/Create/Update/Delete), the CRDs it
-  owns (`CompositionDefinition`, `KubernetesTarget`), what it deploys per version, local-vs-remote
-  targeting, the digest-based idempotency contract, and the metrics endpoint.
+  owns (`CompositionDefinition`, `KubernetesTarget`), what it deploys per version, the status
+  projection + `apiRef` contract (status-schema injection, CDC config delivery, token + authn
+  mapping lifecycle), local-vs-remote targeting, the digest-based idempotency contract, and the
+  metrics endpoint.
 - [gotchas.md](gotchas.md): real runtime pitfalls — Kubernetes >= 1.36 requirement, the
   MutatingAdmissionPolicy dependency, runtime asset templates loaded from disk, multi-version CRD
-  ownership, deletion ordering, and credential/secret watches.
+  ownership, deletion ordering, credential/secret watches, and the `apiRef` authn-operator +
+  group-RBAC prerequisites.
+
+## Feature how-tos & design
+
+- [how-to/apiref-status-projection-authn.md](how-to/apiref-status-projection-authn.md): how
+  `spec.apiRef` projects a `RESTAction` into composition status — the per-composition CDC
+  ServiceAccount, the auto-created authn allowlist mapping, the operator's group-RBAC step, and the
+  config summary (env `COMPOSITION_AUTHN_NAMESPACE`, audience `authn`, token path, issued group
+  `krateo:cdc:<resource>-<apiVersion>`). Source: `apis/.../types.go` (`statusDataTemplate`,
+  `apiRef`), `internal/tools/crd/generation/statusfields.go` (status-schema injection),
+  `internal/tools/deploy/authnmapping.go` (allowlist mapping), `internal/tools/deploy/deploy.go` +
+  `internal/controllers/compositiondefinitions/compositiondefinitions.go` (CDC config:
+  `COMPOSITION_CONTROLLER_STATUS_DATA_TEMPLATE` / `_API_REF_NAME` / `_NAMESPACE` / `_EXTRAS`).
 
 ## Reference (source of truth)
 

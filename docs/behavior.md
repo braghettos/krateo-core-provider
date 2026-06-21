@@ -37,7 +37,12 @@ method first fetches+unpacks the chart, derives the GVK, and reads `values.schem
 
 ### Create (`compositiondefinitions.go:511`)
 Generates the CRD, `ApplyOrUpdateCRD`, then `deploy.Deploy` (real apply), and stores the returned
-digest in `status.digest` (`:544`, `:564`, `:574`).
+digest in `status.digest` (`:544`, `:564`, `:574`). When `spec.statusDataTemplate` is set, after
+`GenerateCRD` it `ValidateStatusFields` then `InjectStatusFields` to extend the generated CRD's
+**status** schema with each declared `forPath` before applying (`:645-654`); a validation error
+(empty/duplicate `forPath`, collision with a reserved baseline status key, type/schema conflict,
+or an unparseable `${ jq }`) fails the reconcile. Update and Observe re-inject the same way
+(`:815`, `:899`).
 
 ### Update (`compositiondefinitions.go:579`)
 Same as Create, plus version migration: if the chart GVK changed, it **undeploys the CDC for the
@@ -59,11 +64,23 @@ also requeues (`:788`).
    `:81`); plus a Secret-scoped Role/RoleBinding when the chart uses private-repo credentials
    (`:325-371`).
 2. **JSON-schema ConfigMap** holding the chart's `values.schema.json` (`:378`).
-3. **CDC config ConfigMap** carrying the SA name/namespace (`:395`).
+3. **CDC config ConfigMap** carrying the SA name/namespace (`:395`), plus the status-projection
+   config: `COMPOSITION_CONTROLLER_STATUS_DATA_TEMPLATE` (the encoded `statusDataTemplate`) and
+   `COMPOSITION_CONTROLLER_API_REF_NAME` / `_NAMESPACE` / `_EXTRAS` (the `apiRef`), empty when not
+   declared (`configmap.yaml`, encoders at `compositiondefinitions.go:492`, `:514`).
 4. **Deployment** running `ghcr.io/krateoplatformops/composition-dynamic-controller` with
    `-group/-version/-resource/-namespace` args (template at
-   `.../testdata/manifests/deployment.yaml`).
+   `.../testdata/manifests/deployment.yaml`). **Only when `apiRef` is declared** it also mounts a
+   projected `authn`-audience ServiceAccount token at `/var/run/secrets/krateo.io/serviceaccount/token`
+   (1h expiry; the volume and mount are gated on `api_ref_name`, `deployment.yaml:53-67`).
 5. **Service** — only if the service template file exists on disk (`:437`).
+6. **authn allowlist mapping** — only when `apiRef` is declared: a
+   `serviceaccount.authn.krateo.io/ServiceAccount` named `cdc-<compositionNamespace>-<resource>-<apiVersion>`,
+   created in the authn operator namespace (`AuthnNamespace`, env `COMPOSITION_AUTHN_NAMESPACE`,
+   default `krateo-system`), referencing the per-composition CDC SA and granting the group
+   `krateo:cdc:<resource>-<apiVersion>` (`authnmapping.go:58`). It is hashed into the digest so
+   Deploy/Lookup agree (`authnmapping.go:79`) and removed on `Undeploy` (`deploy.go:621`,
+   not-found / missing-CRD ignored so it never blocks teardown, `authnmapping.go:118`).
 
 In non-dry-run mode it waits for the Deployment to be Ready, restarts it so it picks up the new
 ConfigMap, then waits again (`:458-485`). Resource names follow `<plural>-<version>-controller`,
@@ -88,6 +105,30 @@ changes nothing computes an identical digest and is a no-op.
   **`MutatingAdmissionPolicy`** shipped by the chart — NOT by core-provider (`compositiondefinitions.go:94-97`).
 - **Status-only updates**: if only the status schema differs, core-provider updates just the status
   sub-schema across versions to avoid disturbing the dynamically generated spec (`crd.go:186-206`).
+
+## Status projection & `apiRef` (since 2.3.0)
+
+A `CompositionDefinition` may declare `spec.statusDataTemplate` and/or `spec.apiRef`. core-provider
+does NOT evaluate the projection itself — it (a) widens the generated CRD's status schema so the
+declared `forPath`s are valid status properties, and (b) ships the config to the CDC, which does the
+evaluation each reconcile:
+
+- **Schema injection**: `InjectStatusFields` adds each declared `forPath` (nested objects allowed)
+  under the status schema of every served version, with the leaf typed from `schema` →
+  `preserveUnknownFields`/object/array → scalar `type` → string fallback (`statusfields.go:137`).
+  A `forPath` whose top segment is a reserved baseline status key (`conditions`, `digest`,
+  `previousDigest`, `managed`, `helmChartUrl`, `helmChartVersion`, `observedGeneration`) is rejected
+  (`statusfields.go:26-34`).
+- **CDC delivery**: the encoded `statusDataTemplate` and the `apiRef` (name/namespace/extras) ride
+  in the CDC config ConfigMap as the `COMPOSITION_CONTROLLER_*` env keys above. The CDC evaluates
+  each `${ jq }` over a combined root and writes the result under `.status` at `forPath`; when
+  `apiRef` is set, the resolved `RESTAction` calls are exposed under `.api` in that root.
+- **authn handshake (only with `apiRef`)**: the CDC presents its projected `authn`-audience token to
+  authn, which exchanges it for a short-lived service JWT — but only for SAs on its allowlist. The
+  mapping core-provider auto-creates supplies that allowlist entry and the issued group
+  `krateo:cdc:<resource>-<apiVersion>`; the CDC then resolves the `RESTAction` via snowplow under
+  that identity. authn never authors RBAC — the platform operator must bind the issued group to the
+  reads the `RESTAction` performs (see `docs/how-to/apiref-status-projection-authn.md`).
 
 ## Local vs remote targets
 
