@@ -458,29 +458,47 @@ func TestController(t *testing.T) {
 				t.Fatal(err)
 			}
 			crdName := fmt.Sprintf("%s.%s", res.Status.Resource, gv.Group)
-			err = r.Get(ctx, crdName, "", &crd)
-			if err != nil {
-				t.Fatal(err)
+
+			hasVersion := func(name string) bool {
+				return slices.ContainsFunc(crd.Spec.Versions, func(v apiextensionsv1.CustomResourceDefinitionVersion) bool {
+					return v.Name == name
+				})
 			}
 
-			// Check CRD version
-			if len(crd.Spec.Versions) != 3 {
-				t.Fatalf("Expected 3 versions, got %d", len(crd.Spec.Versions))
+			// The served-version prune (#103) removes the now-stale old version once nothing
+			// references it (no other CompositionDefinition is on it and no Composition instance
+			// carries its version label), so after the 2.0.3 -> 2.0.4 upgrade the CRD converges to
+			// [vacuum (storage), <new> (served)] — the old version is dropped. The prune is driven
+			// from Observe and applied over several reconciles, so poll the CRD until it converges.
+			//
+			// NOTE: Status.Managed.VersionInfo (the watcher condition above) is append-only history
+			// — it is NOT trimmed on prune, so it intentionally still lists the pruned version,
+			// which is why the watcher waits for 3 while the live CRD settles at 2.
+			deadline := time.Now().Add(2 * time.Minute)
+			for {
+				if err = r.Get(ctx, crdName, "", &crd); err != nil {
+					t.Fatal(err)
+				}
+				if len(crd.Spec.Versions) == 2 {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("CRD did not converge to 2 versions after the served-version prune; got %d: %v",
+						len(crd.Spec.Versions), crd.Spec.Versions)
+				}
+				time.Sleep(5 * time.Second)
 			}
-			if !slices.ContainsFunc(crd.Spec.Versions, func(v apiextensionsv1.CustomResourceDefinitionVersion) bool {
-				return v.Name == newVersionNormalized
-			}) {
-				t.Fatalf("Expected version %s, got %v", newVersionNormalized, crd.Spec.Versions)
+
+			// new version is served, storage (vacuum) is retained, stale old version is pruned.
+			if !hasVersion(newVersionNormalized) {
+				t.Fatalf("Expected new version %s to be served, got %v", newVersionNormalized, crd.Spec.Versions)
 			}
-			if !slices.ContainsFunc(crd.Spec.Versions, func(v apiextensionsv1.CustomResourceDefinitionVersion) bool {
-				return v.Name == oldVersionNormalized
-			}) {
-				t.Fatalf("Expected version %s, got %v", oldVersionNormalized, crd.Spec.Versions)
+			if !hasVersion("vacuum") {
+				t.Fatalf("Expected storage version vacuum to be retained, got %v", crd.Spec.Versions)
 			}
-			if !slices.ContainsFunc(crd.Spec.Versions, func(v apiextensionsv1.CustomResourceDefinitionVersion) bool {
-				return v.Name == "vacuum"
-			}) {
-				t.Fatalf("Expected version vacuum, got %v", crd.Spec.Versions)
+			if hasVersion(oldVersionNormalized) {
+				t.Fatalf("Expected stale old version %s to be pruned, but it is still present: %v",
+					oldVersionNormalized, crd.Spec.Versions)
 			}
 
 		}
