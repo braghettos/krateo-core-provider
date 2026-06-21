@@ -8,6 +8,7 @@ The **Krateo Core Provider** is the foundation of Krateo Composable Operations (
 - **Schema-Driven Validation**: Enforces strict input validation at the API level.
 - **Orchestration**: Manages the lifecycle of Composition Dynamic Controllers (CDCs).
 - **Local or remote deployment** (since 2.0.0): A `CompositionDefinition` deploys its Composition into the local management cluster by default, or into a remote cluster selected with `spec.deploy.targetRef` (a cluster-scoped `KubernetesTarget` pointing at a kubeconfig `Secret`). See [Remote deployment targets](docs/how-to/remote-target-credentials.md) and the [design doc](docs/design/multicluster-compositions.md).
+- **Composition status projection** (since 2.3.0): A `CompositionDefinition` may declare optional `spec.statusDataTemplate` (snowplow-style `${ jq }` mappings written under `.status` at a `forPath`) and `spec.apiRef` (a `RESTAction` reference whose resolved calls become a `.api` projection source). core-provider injects the declared fields into the generated CRD's status schema and ships the config to the composition-dynamic-controller (CDC); when `apiRef` is set it also projects an `authn`-audience ServiceAccount token onto the CDC and auto-provisions the authn allowlist mapping. See [apiRef status projection & authn](docs/how-to/apiref-status-projection-authn.md).
 
 ## Requirements
 

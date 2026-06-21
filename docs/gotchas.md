@@ -76,6 +76,40 @@ hasher includes) flips every existing definition to "not up to date" and re-appl
 CDC Deployment (`deploy.go:458-485`) — which can churn running controllers fleet-wide. Treat
 template changes as a fleet-wide reconcile event.
 
+## `apiRef` status projection needs the authn operator AND an operator-authored RBAC binding
+Declaring `spec.apiRef` makes core-provider auto-provision a `serviceaccount.authn.krateo.io/ServiceAccount`
+allowlist mapping in the authn operator namespace and project an `authn`-audience token onto the CDC
+(`authnmapping.go:58`, `deployment.yaml:53-67`). Two things are NOT auto-provisioned and will make
+the projection silently read nothing or fail at the CDC: (1) the authn operator must actually be
+installed and watching `COMPOSITION_AUTHN_NAMESPACE` (default `krateo-system`) — if that env points
+at the wrong namespace, or authn isn't there, the token exchange never succeeds; (2) authn **never
+authors RBAC** — the platform operator must bind the per-composition group
+`krateo:cdc:<resource>-<apiVersion>` (which becomes the issued cert's `O=`) to a Role/ClusterRole
+granting exactly the reads the referenced `RESTAction` performs. Without that binding the resolved
+RESTAction is unauthorized. See `docs/how-to/apiref-status-projection-authn.md`.
+
+## core-provider needs manage rights on `serviceaccounts.serviceaccount.authn.krateo.io`
+The authn mapping is created/deleted by core-provider itself, so its chart ClusterRole must grant
+manage on `serviceaccounts.serviceaccount.authn.krateo.io`. If that RBAC (or the authn CRD) is
+missing, Deploy fails creating the mapping; on undeploy a not-found / no-CRD-match is tolerated so it
+never blocks composition teardown (`authnmapping.go:118`). The grant lives in
+`braghettos/krateo-core-provider-chart`, not this binary.
+
+## `statusDataTemplate` forPaths can't shadow baseline status fields, and are validated at reconcile
+`InjectStatusFields` widens the generated CRD's status schema, but `ValidateStatusFields` runs first
+and **fails the reconcile** on: an empty or duplicate `forPath`; a `forPath` whose top segment is a
+reserved baseline key (`conditions`, `digest`, `previousDigest`, `managed`, `helmChartUrl`,
+`helmChartVersion`, `observedGeneration`); combining `type` with `schema`/`preserveUnknownFields`, or
+`schema` with `preserveUnknownFields`; or an unparseable `${ jq }` expression (`statusfields.go:26-71`).
+core-provider only shapes the schema — the `${ jq }` is evaluated by the CDC, so a syntactically
+valid expression that resolves to nothing simply writes nothing under `.status`.
+
+## Changing statusDataTemplate / apiRef re-renders the CDC (digest churn)
+The encoded `statusDataTemplate`, the `apiRef`, the projected-token volume, and the authn mapping all
+feed the FNV digest (the mapping via `hashAuthnServiceAccountMapping`, `authnmapping.go:79`). Editing
+any of them flips the definition to "not up to date" and re-applies + restarts the CDC Deployment,
+exactly like any other template change.
+
 ## No webhook server / no serving cert — don't look for one
 Unlike pre-2.0.0, the manager starts with no webhook server and no serving certificate
 (`main.go:104-118`). There is nothing on a webhook port; the only server is the `:8080` metrics
