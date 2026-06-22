@@ -27,6 +27,7 @@ import (
 	"github.com/krateoplatformops/core-provider/internal/tools/kube"
 	pluralizerlib "github.com/krateoplatformops/core-provider/internal/tools/pluralizer"
 	"github.com/krateoplatformops/core-provider/internal/tools/policy"
+	coretelemetry "github.com/krateoplatformops/core-provider/internal/tools/telemetry"
 	rtv1 "github.com/krateoplatformops/provider-runtime/apis/common/v1"
 	"github.com/krateoplatformops/provider-runtime/pkg/controller"
 
@@ -35,6 +36,9 @@ import (
 	"github.com/krateoplatformops/provider-runtime/pkg/ratelimiter"
 	"github.com/krateoplatformops/provider-runtime/pkg/reconciler"
 	"github.com/krateoplatformops/provider-runtime/pkg/resource"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -560,6 +564,17 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 	if !ok {
 		return reconciler.ExternalObservation{}, fmt.Errorf(errNotCR)
 	}
+	// Engine reconcile span. core-provider is the top of the chain (no inbound traceparent);
+	// the loghandler bridges this span's trace_id/span_id onto every log of the reconcile.
+	// No-op tracer until OTEL_TRACING_ENABLED.
+	ctx, span := coretelemetry.Tracer().Start(ctx, "compositiondefinition.observe",
+		trace.WithSpanKind(trace.SpanKindServer),
+		trace.WithAttributes(
+			attribute.String("k8s.object.name", cr.GetName()),
+			attribute.String("k8s.object.namespace", cr.GetNamespace()),
+		),
+	)
+	defer span.End()
 	log := e.log.WithValues("operation", "observe")
 	ctx = contexttools.CtxWithLogger(ctx, log)
 	deleted := meta.WasDeleted(cr)
