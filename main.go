@@ -27,6 +27,7 @@ import (
 	"github.com/krateoplatformops/provider-runtime/pkg/ratelimiter"
 	"github.com/krateoplatformops/provider-runtime/pkg/telemetry"
 
+	coretelemetry "github.com/krateoplatformops/core-provider/internal/tools/telemetry"
 	"github.com/stoewer/go-strcase"
 )
 
@@ -44,7 +45,8 @@ func main() {
 	maxReconcileRate := flag.Int("max-reconcile-rate", env.Int(fmt.Sprintf("%s_MAX_RECONCILE_RATE", envVarPrefix), 5), "The global maximum rate per second at which resources may checked for drift from the desired state.")
 	leaderElection := flag.Bool("leader-election", env.Bool(fmt.Sprintf("%s_LEADER_ELECTION", envVarPrefix), false), "Use leader election for the controller manager.")
 	metricsEnabled := flag.Bool("otel-enabled", env.Bool("OTEL_ENABLED", false), "Enable OTLP metrics export for provider-runtime telemetry.")
-	metricsServiceName := flag.String("otel-service-name", fmt.Sprintf("%s-provider", strcase.KebabCase(providerName)), "The service name attached to exported OTLP metrics.")
+	tracingEnabled := flag.Bool("otel-tracing-enabled", env.Bool("OTEL_TRACING_ENABLED", false), "Enable OTLP trace export (distributed reconcile traces).")
+	metricsServiceName := flag.String("otel-service-name", fmt.Sprintf("%s-provider", strcase.KebabCase(providerName)), "The service name attached to exported OTLP metrics/traces.")
 	metricsExportInterval := flag.Duration("otel-export-interval", env.Duration("OTEL_EXPORT_INTERVAL", defaultOtelExportInterval), "The interval used to export OTLP metrics.")
 	maxErrorRetryInterval := flag.Duration("max-error-retry-interval", env.Duration(fmt.Sprintf("%s_MAX_ERROR_RETRY_INTERVAL", envVarPrefix), 1*time.Minute), "The maximum interval between retries when an error occurs. This should be less than the half of the poll interval.")
 	minErrorRetryInterval := flag.Duration("min-error-retry-interval", env.Duration(fmt.Sprintf("%s_MIN_ERROR_RETRY_INTERVAL", envVarPrefix), 1*time.Second), "The minimum interval between retries when an error occurs. This should be less than max-error-retry-interval.")
@@ -80,6 +82,21 @@ func main() {
 	telemetryEnabled := *metricsEnabled
 	telemetryExportInterval := *metricsExportInterval
 
+	// Identify BOTH the metrics (provider-runtime) and trace pipelines via the standard OTel env
+	// BEFORE telemetry.Setup runs: provider-runtime builds its metrics resource from
+	// resource.Default() and IGNORES cfg.ServiceName, so service.name/version must arrive via
+	// OTEL_SERVICE_NAME / OTEL_RESOURCE_ATTRIBUTES (both read by resource.Default at Setup time).
+	// This keeps the metrics and trace resources identical. core-provider is the engine/operator,
+	// so it carries no composition-id.
+	os.Setenv("OTEL_SERVICE_NAME", *metricsServiceName)
+	if sv := os.Getenv("SERVICE_VERSION"); sv != "" {
+		attrs := "service.version=" + sv
+		if existing := os.Getenv("OTEL_RESOURCE_ATTRIBUTES"); existing != "" {
+			attrs = existing + "," + attrs
+		}
+		os.Setenv("OTEL_RESOURCE_ATTRIBUTES", attrs)
+	}
+
 	telemetryMetrics, telemetryShutdown, err := telemetry.Setup(context.Background(), log, telemetry.Config{
 		Enabled:        telemetryEnabled,
 		ServiceName:    *metricsServiceName,
@@ -92,6 +109,20 @@ func main() {
 	defer func() {
 		if err := telemetryShutdown(context.Background()); err != nil {
 			log.Error(err, "Cannot shutdown OpenTelemetry metrics")
+		}
+	}()
+
+	// Distributed reconcile traces (gated OTEL_TRACING_ENABLED, default off). Reuses the
+	// OTEL_SERVICE_NAME / OTEL_RESOURCE_ATTRIBUTES set above, so the trace + metrics resources
+	// are identical (same service.name/version).
+	tracingShutdown, err := coretelemetry.SetupTracing(context.Background(), log, *tracingEnabled)
+	if err != nil {
+		log.Error(err, "Cannot initialize OpenTelemetry tracing")
+		os.Exit(1)
+	}
+	defer func() {
+		if err := tracingShutdown(context.Background()); err != nil {
+			log.Error(err, "Cannot shutdown OpenTelemetry tracing")
 		}
 	}()
 
