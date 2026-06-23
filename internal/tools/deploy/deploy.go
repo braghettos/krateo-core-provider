@@ -32,6 +32,11 @@ import (
 )
 
 const (
+	// CROSS-REPO CONTRACT: CompositionVersionLabel, CompositionDefinitionNameLabel and
+	// CompositionDefinitionNamespaceLabel are declared INDEPENDENTLY here and in
+	// composition-dynamic-controller's pkg/meta/meta.go (core-provider does not import the CDC).
+	// The three strings MUST stay byte-identical: if they drift, owner-scoped version migration
+	// silently selects nothing and leaves composition instances orphaned. Edit one → edit both.
 	CompositionVersionLabel = "krateo.io/composition-version"
 	// CompositionDefinitionNameLabel / CompositionDefinitionNamespaceLabel identify the
 	// CompositionDefinition that OWNS a composition instance. The composition-dynamic-controller
