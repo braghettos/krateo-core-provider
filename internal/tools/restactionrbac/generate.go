@@ -81,6 +81,32 @@ func Generate(readSet []Resource, group, name string) Generated {
 	return out
 }
 
+// GenerateClusterScoped collapses the whole read-set into a SINGLE ClusterRole + binding for the
+// group, ignoring per-row namespace (a Phase 1 simplification — per-namespace Roles via Generate
+// are a Phase 3 refinement). It always returns non-nil objects (Rules may be empty) so the deploy
+// lifecycle — apply, digest-hash, lookup, delete — keys off one fixed-name object pair, exactly
+// like the authn ServiceAccount mapping. Verbs are per-row (least privilege, never "*").
+func GenerateClusterScoped(readSet []Resource, group, name string) (*rbacv1.ClusterRole, *rbacv1.ClusterRoleBinding) {
+	cr := &rbacv1.ClusterRole{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Rules:      buildRules(readSet),
+	}
+	crb := &rbacv1.ClusterRoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Subjects: []rbacv1.Subject{{
+			Kind:     rbacv1.GroupKind,
+			Name:     group,
+			APIGroup: rbacv1.GroupName,
+		}},
+		RoleRef: rbacv1.RoleRef{
+			APIGroup: rbacv1.GroupName,
+			Kind:     "ClusterRole",
+			Name:     name,
+		},
+	}
+	return cr, crb
+}
+
 // buildRules aggregates rows by (apiGroup, verb) into PolicyRules, sorted for
 // determinism. Each row contributes its resource under its own verb.
 func buildRules(rows []Resource) []rbacv1.PolicyRule {

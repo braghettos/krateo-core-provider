@@ -68,6 +68,12 @@ var (
 	// allowlist mapping is created (when a CompositionDefinition declares an apiRef). Override
 	// via COMPOSITION_AUTHN_NAMESPACE; defaults to "krateo-system".
 	AuthnNamespace = envOr("COMPOSITION_AUTHN_NAMESPACE", "krateo-system")
+
+	// SnowplowURL is snowplow's base URL. When a CompositionDefinition declares an apiRef,
+	// core-provider calls snowplow's dispatch-free GET /rbac to enumerate the RESTAction's
+	// read-set and grant it to the per-composition group. Override via CORE_PROVIDER_SNOWPLOW_URL;
+	// required when apiRef is used (an empty value fails the reconcile with a clear message).
+	SnowplowURL = envOr("CORE_PROVIDER_SNOWPLOW_URL", "")
 )
 
 func envOr(key, def string) string {
@@ -714,6 +720,7 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 		ApiRefNamespace:        apiRefNamespace(cr),
 		ApiRefExtras:           encodeApiRefExtras(cr),
 		AuthnNamespace:         AuthnNamespace,
+		SnowplowURL:            SnowplowURL,
 		DryRunServer:           true,
 	}
 	dig, err := deploy.Deploy(ctx, e.kube, opts)
@@ -858,6 +865,7 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) error {
 		ApiRefNamespace:        apiRefNamespace(cr),
 		ApiRefExtras:           encodeApiRefExtras(cr),
 		AuthnNamespace:         AuthnNamespace,
+		SnowplowURL:            SnowplowURL,
 	}
 
 	dig, err := deploy.Deploy(ctx, e.kube, opts)
@@ -942,6 +950,7 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 		ApiRefNamespace:        apiRefNamespace(cr),
 		ApiRefExtras:           encodeApiRefExtras(cr),
 		AuthnNamespace:         AuthnNamespace,
+		SnowplowURL:            SnowplowURL,
 	}
 
 	dig, err := deploy.Deploy(ctx, e.kube, opts)
