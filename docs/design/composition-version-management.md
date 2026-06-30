@@ -1,7 +1,10 @@
-# Composition version management & upgrade (design sketch)
+# Composition version management & upgrade
 
-**Status:** sketch / working design — describes current behavior + the in-flight fix for the
-version-bump orphan bug (#102).
+**Status:** **implemented** — the #102 version-bump orphan fix has landed in the fork: owner-scoped
+migration, write-through-the-new-endpoint, idempotent Observe-driven self-heal, reference-counted
+version retirement, and served-version pruning are all in the code (see the file:line map in §5/§6).
+This doc is the reference for that behavior; the per-section status notes below have been reconciled
+to the code.
 **Audience:** core-provider engine maintainers.
 **Scope:** how one `CompositionDefinition` maps to a multi-version CRD + per-version dynamic
 controllers, how composition instances are migrated when a definition's chart version changes,
@@ -202,10 +205,12 @@ In the shared-CRD case the migration **must be scoped to the owning definition**
   only when **no** CompositionDefinition (across all of them) still references `vA`. A shared
   controller is load-bearing for every definition still on that version.
 
-> Status as of this sketch: the in-flight #102 fix implements the "write through the new endpoint"
-> + "idempotent, Observe-driven re-drive" parts. The **definition-name scoping** on migration and
-> the **reference-counted retirement** are required additions for the multi-definition case and are
-> tracked alongside #102 before merge.
+> **Status: all landed.** Write-through-the-new-endpoint + idempotent Observe-driven re-drive
+> (`getters.UpdateCompositionsVersion`, `compositiondefinitions.go:1003-1019`), **definition-name
+> scoping** (`getters.GetOwnedCompositionsByVersionLabel` / `compositionSelector`), and
+> **reference-counted retirement + served-version pruning**
+> (`compositiondefinitions.go:versionReferencedByAnotherDefinition:375`,
+> `prunableServedVersions:401`, `pruneStaleServedVersions:437`) are all implemented.
 
 ---
 
@@ -240,8 +245,8 @@ at its handoff state (one cluster mid-rollout never emitted its workload chain; 
   `Update` re-runs the re-stamp until none remain. Stragglers from a racey transition — or an
   instance re-written through an old endpoint after status advanced — are reconciled instead of
   orphaned.
-- **(Required for §3)** scope the migration to the owning definition and reference-count version
-  retirement, as above.
+- **(For §3 — done)** the migration is scoped to the owning definition and version retirement is
+  reference-counted (`versionReferencedByAnotherDefinition` / `prunableServedVersions`).
 
 cdc needs no change — it correctly reconciles whatever the `composition-version` label selects; the
 defect and the fix are entirely in core-provider's definition reconcile.
@@ -258,21 +263,22 @@ defect and the fix are entirely in core-provider's definition reconcile.
 - A served version + its controller exist as long as ≥ 1 CompositionDefinition references it.
 - Migration only ever moves instances **within one owning definition's lineage**.
 
-**Open questions**
+**Resolved**
 
-1. **Retirement refcount source of truth.** Compute "is `vA` still referenced?" by listing
-   CompositionDefinitions resolving to this `(group, Kind)` and checking their current chart
-   versions, vs. tracking a refcount in CRD/status. Listing is simpler and stateless.
+1. **Retirement refcount source of truth → listing.** "Is `vA` still referenced?" is computed by
+   listing CompositionDefinitions resolving to this `(group, Kind)` and checking their current
+   versions — simpler and stateless. Implemented: `versionReferencedByAnotherDefinition`.
+3. **vacuum & served-version pruning → implemented.** Refcount-0 served versions whose label no
+   instance carries are removed from `spec.versions` (`prunableServedVersions` / `pruneStaleServedVersions`
+   / `crdutils.RemoveStaleVersions`), bounding the straggler scan and CRD size.
+5. **chart/binary policy-name skew → reconciled.** Both the chart (management cluster) and the
+   binary's remote projection now use the fixed singleton name **`krateo-composition-version`**.
+
+**Open**
+
 2. **Down-version / rollback.** `0.2.128 → 0.2.125`: `v0-2-125` is already served; migration is
-   symmetric (re-stamp through the `v0-2-125` endpoint). Confirm `AppendVersion` is a no-op when
-   the version already exists and that storage stays `vacuum`.
-3. **vacuum & served-version pruning.** Served versions accumulate forever today. Should retired
-   (refcount-0) versions be removed from `spec.versions` once no instance carries their label? This
-   bounds the per-reconcile straggler scan and CRD size.
+   symmetric (re-stamp through the `v0-2-125` endpoint). The code path exists; **add an explicit
+   test** that `AppendVersion` is a no-op when the version already exists and storage stays `vacuum`.
 4. **Policy absence fallback.** On clusters without the `MutatingAdmissionPolicy`, the explicit
-   label-set in the migration is the only stamping path; document this as a supported-but-degraded
-   mode or require the policy.
-5. **chart/binary policy-name skew.** The management chart ships
-   `<release>-compositions-version-policy`; the binary's `policy.EnsureCompositionVersionPolicy`
-   creates a differently-named `krateo-composition-version`. Only the chart's exists on the
-   reference cluster. Reconcile to one source of truth.
+   label-set in the migration is the only stamping path (it exists as a fallback). Remaining work is
+   to **document** this as a supported-but-degraded mode.
