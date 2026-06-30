@@ -32,6 +32,11 @@ import (
 )
 
 const (
+	// CROSS-REPO CONTRACT: CompositionVersionLabel, CompositionDefinitionNameLabel and
+	// CompositionDefinitionNamespaceLabel are declared INDEPENDENTLY here and in
+	// composition-dynamic-controller's pkg/meta/meta.go (core-provider does not import the CDC).
+	// The three strings MUST stay byte-identical: if they drift, owner-scoped version migration
+	// silently selects nothing and leaves composition instances orphaned. Edit one → edit both.
 	CompositionVersionLabel = "krateo.io/composition-version"
 	// CompositionDefinitionNameLabel / CompositionDefinitionNamespaceLabel identify the
 	// CompositionDefinition that OWNS a composition instance. The composition-dynamic-controller
@@ -69,6 +74,8 @@ type UndeployOptions struct {
 	AuthnNamespace string
 }
 
+// (UndeployOptions needs no SnowplowURL: the apiRef ClusterRole + binding are deleted by name.)
+
 type DeployOptions struct {
 	GVR                    schema.GroupVersionResource
 	DiscoveryClient        discovery.CachedDiscoveryInterface
@@ -96,6 +103,14 @@ type DeployOptions struct {
 	// AuthnNamespace is the authn operator namespace where the ServiceAccount allowlist
 	// mapping is created (when ApiRefName is set). Empty defaults to "krateo-system".
 	AuthnNamespace string
+	// SnowplowURL is snowplow's base URL. When ApiRefName is set, core-provider calls its
+	// dispatch-free GET /rbac to enumerate the RESTAction's read-set and grant it to the
+	// per-composition group. Required when ApiRefName is set.
+	SnowplowURL string
+	// AuthnURL is the authn service base URL. snowplow's /rbac is gated by the same JWT middleware
+	// as /call, so core-provider exchanges its projected SA token for an authn-issued service JWT
+	// and presents it as the Bearer. Empty ⇒ the /rbac call is unauthenticated (snowplow 401).
+	AuthnURL string
 	// DryRunServer is used to determine if the deployment should be applied in dry-run mode. This is ignored in lookup mode
 	DryRunServer bool
 }
@@ -408,6 +423,14 @@ func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 		return "", err
 	}
 
+	// ...and grant the per-composition group exactly the in-cluster reads the referenced
+	// RESTAction performs (snowplow GET /rbac). Returns restactionrbac.ErrIncomplete on a 422 —
+	// the caller maps that to the ApiRefRBACIncomplete condition instead of writing partial RBAC.
+	err = applyRestActionRBAC(ctx, opts.KubeClient, opts, sa.Name, &hsh, applyOpts)
+	if err != nil {
+		return "", err
+	}
+
 	jsonSchemaConfigmap := corev1.ConfigMap{}
 	err = objects.CreateK8sObject(&jsonSchemaConfigmap, opts.GVR, getJsonSchemaConfigmapNN(namespacedName), opts.JsonSchemaTemplatePath,
 		"schema", string(opts.JsonSchemaBytes),
@@ -623,6 +646,12 @@ func Undeploy(ctx context.Context, kube client.Client, opts UndeployOptions) err
 		return err
 	}
 
+	// Remove the apiRef RBAC (ClusterRole + binding) by name; not-found is tolerated.
+	err = deleteRestActionRBAC(ctx, opts.KubeClient, sa.Name)
+	if err != nil {
+		return err
+	}
+
 	_, err = os.Stat(opts.ServiceTemplatePath)
 	if err == nil {
 		svc := corev1.Service{}
@@ -746,6 +775,13 @@ func Lookup(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 	// Contribute the authn mapping to the digest (deterministically) so it matches Deploy.
 	if err = hashAuthnServiceAccountMapping(opts, sa.Name, &hsh); err != nil {
 		return "", fmt.Errorf("error hashing authn ServiceAccount mapping: %v", err)
+	}
+
+	// Live apiRef RBAC contribution — read the ClusterRole + binding and hash, mirroring the
+	// rendered-side applyRestActionRBAC so a deleted/edited grant surfaces as drift. No snowplow
+	// call here; only Deploy queries /rbac.
+	if err = lookupRestActionRBAC(ctx, opts.KubeClient, opts, sa.Name, &hsh); err != nil {
+		return "", fmt.Errorf("error hashing apiRef RBAC: %v", err)
 	}
 
 	jsonSchemaConfigmap := corev1.ConfigMap{}
