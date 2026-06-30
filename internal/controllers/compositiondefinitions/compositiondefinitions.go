@@ -74,6 +74,11 @@ var (
 	// read-set and grant it to the per-composition group. Override via CORE_PROVIDER_SNOWPLOW_URL;
 	// required when apiRef is used (an empty value fails the reconcile with a clear message).
 	SnowplowURL = envOr("CORE_PROVIDER_SNOWPLOW_URL", "")
+
+	// AuthnURL is the authn service base URL. snowplow's /rbac is gated by the same JWT middleware
+	// as /call, so core-provider exchanges its projected SA token for an authn-issued service JWT
+	// to authenticate. Override via CORE_PROVIDER_AUTHN_URL.
+	AuthnURL = envOr("CORE_PROVIDER_AUTHN_URL", "")
 )
 
 func envOr(key, def string) string {
@@ -721,6 +726,7 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 		ApiRefExtras:           encodeApiRefExtras(cr),
 		AuthnNamespace:         AuthnNamespace,
 		SnowplowURL:            SnowplowURL,
+		AuthnURL:               AuthnURL,
 		DryRunServer:           true,
 	}
 	dig, err := deploy.Deploy(ctx, e.kube, opts)
@@ -866,6 +872,7 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) error {
 		ApiRefExtras:           encodeApiRefExtras(cr),
 		AuthnNamespace:         AuthnNamespace,
 		SnowplowURL:            SnowplowURL,
+		AuthnURL:               AuthnURL,
 	}
 
 	dig, err := deploy.Deploy(ctx, e.kube, opts)
@@ -951,6 +958,7 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 		ApiRefExtras:           encodeApiRefExtras(cr),
 		AuthnNamespace:         AuthnNamespace,
 		SnowplowURL:            SnowplowURL,
+		AuthnURL:               AuthnURL,
 	}
 
 	dig, err := deploy.Deploy(ctx, e.kube, opts)

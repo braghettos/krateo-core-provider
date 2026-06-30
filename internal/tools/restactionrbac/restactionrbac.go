@@ -61,11 +61,16 @@ type Params struct {
 	Extras          map[string]any
 }
 
+// TokenFunc returns the Bearer token authenticating to snowplow. snowplow's GET /rbac is gated by
+// the same JWT middleware as /call, so an authn-issued service JWT is required (see internal/tools/authn).
+type TokenFunc func(context.Context) (string, error)
+
 // Client calls snowplow's GET /rbac. Server is snowplow's base URL (the same
 // service core-provider already injects into the CDC config as URL_SNOWPLOW).
 type Client struct {
 	server     string
 	httpClient *http.Client
+	token      TokenFunc
 }
 
 // New returns a Client for the snowplow base URL.
@@ -74,6 +79,13 @@ func New(server string) *Client {
 		server:     server,
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 	}
+}
+
+// WithToken sets the Bearer-token source for authenticating to /rbac. Without it the request is
+// unauthenticated and snowplow answers 401.
+func (c *Client) WithToken(fn TokenFunc) *Client {
+	c.token = fn
+	return c
 }
 
 // WithHTTPClient overrides the HTTP client (tests, custom transports).
@@ -119,6 +131,13 @@ func (c *Client) Inspect(ctx context.Context, params Params) ([]Resource, error)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u+"?"+q.Encode(), nil)
 	if err != nil {
 		return nil, fmt.Errorf("restactionrbac: creating request: %w", err)
+	}
+	if c.token != nil {
+		tok, err := c.token(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("restactionrbac: obtaining auth token: %w", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+tok)
 	}
 
 	resp, err := c.httpClient.Do(req)

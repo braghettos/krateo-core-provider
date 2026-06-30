@@ -107,6 +107,10 @@ type DeployOptions struct {
 	// dispatch-free GET /rbac to enumerate the RESTAction's read-set and grant it to the
 	// per-composition group. Required when ApiRefName is set.
 	SnowplowURL string
+	// AuthnURL is the authn service base URL. snowplow's /rbac is gated by the same JWT middleware
+	// as /call, so core-provider exchanges its projected SA token for an authn-issued service JWT
+	// and presents it as the Bearer. Empty ⇒ the /rbac call is unauthenticated (snowplow 401).
+	AuthnURL string
 	// DryRunServer is used to determine if the deployment should be applied in dry-run mode. This is ignored in lookup mode
 	DryRunServer bool
 }

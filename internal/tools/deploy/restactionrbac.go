@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 
+	"github.com/krateoplatformops/core-provider/internal/tools/authn"
 	contexttools "github.com/krateoplatformops/core-provider/internal/tools/context"
 	hasher "github.com/krateoplatformops/core-provider/internal/tools/hash"
 	kubecli "github.com/krateoplatformops/core-provider/internal/tools/kube"
@@ -16,6 +18,19 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
+
+// authnClientFor returns a process-wide authn client for the given URL. It is a singleton so the
+// issued JWT is cached across reconciles (the exchange is amortised), mirroring how the CDC holds a
+// long-lived authn client. The authn URL is stable (env-driven), so the first-seen URL wins.
+var (
+	authnOnce sync.Once
+	authnInst *authn.Client
+)
+
+func authnClientFor(server string) *authn.Client {
+	authnOnce.Do(func() { authnInst = authn.New(server, "") })
+	return authnInst
+}
 
 // When a CompositionDefinition declares an apiRef, the referenced RESTAction is resolved by
 // snowplow under the per-composition group krateo:cdc:<resource>-<apiVersion>. This file generates
@@ -57,7 +72,15 @@ func restActionReadSet(ctx context.Context, opts DeployOptions) ([]restactionrba
 	if err != nil {
 		return nil, err
 	}
-	return restactionrbac.New(opts.SnowplowURL).Inspect(ctx, restactionrbac.Params{
+	cli := restactionrbac.New(opts.SnowplowURL)
+	// snowplow's /rbac is gated by the same JWT middleware as /call: authenticate with an
+	// authn-issued service JWT (core-provider presents its own projected SA token to authn),
+	// mirroring how the CDC reaches snowplow for apiRef resolution. Without an authn URL the
+	// request is unauthenticated and snowplow answers 401.
+	if opts.AuthnURL != "" {
+		cli = cli.WithToken(authnClientFor(opts.AuthnURL).Token)
+	}
+	return cli.Inspect(ctx, restactionrbac.Params{
 		APIRefName:      opts.ApiRefName,
 		APIRefNamespace: opts.ApiRefNamespace,
 		Extras:          extras,

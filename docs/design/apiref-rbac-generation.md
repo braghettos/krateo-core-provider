@@ -177,9 +177,18 @@ non-kube path), snowplow returns **`422` + an error string naming every unresolv
 provider maps that `422` to the `ApiRefRBACIncomplete` condition. (`400` missing params, `500`
 structural failure.) An empty `readSet` (every stage external/discovery) is a legitimate `200` `[]`.
 
-**Request:** `GET /rbac?apiRefName=…&apiRefNamespace=…&extras=<url-encoded JSON>` — `extras` is the
-same per-instance context the `/call` path takes; snowplow loads the RESTAction fresh from the
-informer cache each call.
+**Request:** `GET /rbac?apiRefName=…&apiRefNamespace=…&extras=<url-encoded JSON>` with
+`Authorization: Bearer <authn service JWT>` — `extras` is the same per-instance context the `/call`
+path takes; snowplow loads the RESTAction fresh from the informer cache each call.
+
+**Authentication (verified live).** `/rbac` is gated by the **same JWT middleware as `/call`** — an
+unauthenticated call gets `401 "missing authorization header"`. So core-provider must authenticate
+the way the CDC already does for `apiRef`: present its **own projected `authn`-audience SA token**
+to authn's `/serviceaccount/login`, receive a service JWT, and `Bearer` it to `/rbac`
+(`internal/tools/authn` mirrors the CDC's `internal/authn`; the JWT is cached to expiry). This
+imposes two **deployment** prerequisites on core-provider's pod (chart, not code), the same two it
+already provisions for the CDC: a **projected `authn`-audience token** mount, and core-provider's
+ServiceAccount on **authn's allowlist** so the exchange is permitted.
 
 ### 3.2 What snowplow puts in each `readSet` row (verb included)
 
@@ -290,6 +299,12 @@ manages a chart resource.
 Mirror the **authn-mapping** lifecycle exactly (`internal/tools/deploy/authnmapping.go`), which is
 already apiRef-conditional, digest-hashed, and undeploy-cleaned:
 
+**Config (implemented).** `CORE_PROVIDER_SNOWPLOW_URL` (snowplow base URL) and
+`CORE_PROVIDER_AUTHN_URL` (authn base URL, for the JWT exchange — §3.1), both env-driven package
+vars plumbed into `DeployOptions` (mirroring `COMPOSITION_AUTHN_NAMESPACE`). Plus the two **chart**
+prerequisites on core-provider's own pod: a projected `authn`-audience token mount and an authn
+allowlist mapping for core-provider's ServiceAccount.
+
 **Timing (decided by §3.3).** For the recommended scope — GVR resolvable from literals / static
 `apiRef.extras` — generation is **deploy-time, in core-provider, once per type**, as below. Only
 when a RESTAction templates its *GVR* from per-instance data does generation need to move to the
@@ -332,14 +347,15 @@ promptly — otherwise the grant drifts from the calls.
 - **Per-composition isolation is preserved**: the grant targets the single group
   `krateo:cdc:<resource>-<apiVersion>`, so one composition type's RESTAction RBAC never widens
   another's — exactly the isolation the owner-scoped identity already gives.
-- **Trust concentration in the inspector (§3.5).** The inspection runs under snowplow's own
-  identity and resolves *any* RESTAction — the same central-oracle trust chart-inspector already
-  carries (it can dry-run any chart under its SA). Acceptable, but it makes the inspection endpoint
-  a privileged surface: the `/rbac` endpoint must be **access-controlled** so only core-provider can
-  ask "what would this RESTAction need." NB: chart-inspector's `/resources` today is called with no
-  token and the handler reads none — whether its HTTP server enforces auth (network policy,
-  mTLS, middleware) is **unverified here and should be confirmed**; the RESTAction `/rbac` endpoint
-  should not inherit an unauthenticated posture by default.
+- **Trust concentration in the inspector (§3.5) — access-controlled (verified live).** The
+  inspection runs under snowplow's own identity and resolves *any* RESTAction — the same
+  central-oracle trust chart-inspector carries. That makes `/rbac` a privileged surface, so it
+  **must be access-controlled**, and it **is**: verified against the deployed endpoint, `/rbac` is
+  gated by the same JWT middleware as `/call` (an unauthenticated call returns `401`). core-provider
+  authenticates with an authn-issued service JWT (§3.1). So the endpoint does *not* inherit an
+  unauthenticated posture — the earlier "unverified" caveat is closed. (chart-inspector's
+  `/resources`, by contrast, is called with no token; its server-side auth posture remains its own
+  concern, separate from `/rbac`.)
 
 ---
 
