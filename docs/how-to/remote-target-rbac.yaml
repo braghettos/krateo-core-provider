@@ -1,9 +1,10 @@
 # Tightest practical ClusterRole for the identity core-provider uses to deploy a
-# CompositionDefinition (spec.deploy.mode: Remote) into a target cluster.
+# CompositionDefinition (spec.deploy.targetRef -> a KubernetesTarget) into a target cluster.
 #
 # It installs the generated CRD, the composition-dynamic-controller workload
-# (Deployment/Service/ConfigMap/ServiceAccount), the RBAC that controller runs as, and
-# cleans up composition instances on delete.
+# (Deployment/Service/ConfigMap/ServiceAccount), the RBAC that controller runs as, the
+# composition-version MutatingAdmissionPolicy (+ binding) core-provider projects, and cleans
+# up composition instances on delete.
 #
 # Note the `bind` and `escalate` verbs on rbac.authorization.k8s.io: the Roles/ClusterRoles
 # this identity creates carry permissions derived from each chart, and Kubernetes
@@ -16,22 +17,91 @@ metadata:
   name: core-provider-remote-target
 rules:
   # The generated CompositionDefinition CRD.
-  - apiGroups: ["apiextensions.k8s.io"]
-    resources: ["customresourcedefinitions"]
-    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  - apiGroups:
+      - apiextensions.k8s.io
+    resources:
+      - customresourcedefinitions
+    verbs:
+      - create
+      - get
+      - list
+      - watch
+      - update
+      - patch
+      - delete
   # The composition-dynamic-controller workload.
-  - apiGroups: ["apps"]
-    resources: ["deployments"]
-    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
-  - apiGroups: [""]
-    resources: ["serviceaccounts", "configmaps", "services"]
-    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  - apiGroups:
+      - apps
+    resources:
+      - deployments
+    verbs:
+      - create
+      - get
+      - list
+      - watch
+      - update
+      - patch
+      - delete
+  - apiGroups:
+      - ""
+    resources:
+      - serviceaccounts
+      - configmaps
+      - services
+    verbs:
+      - create
+      - get
+      - list
+      - watch
+      - update
+      - patch
+      - delete
   # RBAC the controller runs as. bind + escalate are required because the granted
   # permissions are chart-derived and may exceed this identity's own permissions.
-  - apiGroups: ["rbac.authorization.k8s.io"]
-    resources: ["roles", "clusterroles", "rolebindings", "clusterrolebindings"]
-    verbs: ["create", "get", "list", "watch", "update", "patch", "delete", "bind", "escalate"]
+  - apiGroups:
+      - rbac.authorization.k8s.io
+    resources:
+      - roles
+      - clusterroles
+      - rolebindings
+      - clusterrolebindings
+    verbs:
+      - create
+      - get
+      - list
+      - watch
+      - update
+      - patch
+      - delete
+      - bind
+      - escalate
+  # The composition-version policy core-provider projects onto the target. core-provider
+  # (>= 2.5.0) is de-webhooked onto MutatingAdmissionPolicy (GA in k8s 1.36), so the target
+  # identity must be allowed to manage these cluster-scoped policy objects -- otherwise the
+  # very first projection fails with:
+  #   mutatingadmissionpolicies.admissionregistration.k8s.io is forbidden
+  - apiGroups:
+      - admissionregistration.k8s.io
+    resources:
+      - mutatingadmissionpolicies
+      - mutatingadmissionpolicybindings
+      - validatingadmissionpolicies
+      - validatingadmissionpolicybindings
+    verbs:
+      - create
+      - get
+      - list
+      - watch
+      - update
+      - patch
+      - delete
   # Composition instances managed by the CDC, cleaned up on delete.
-  - apiGroups: ["composition.krateo.io"]
-    resources: ["*"]
-    verbs: ["get", "list", "watch", "delete"]
+  - apiGroups:
+      - composition.krateo.io
+    resources:
+      - "*"
+    verbs:
+      - get
+      - list
+      - watch
+      - delete
