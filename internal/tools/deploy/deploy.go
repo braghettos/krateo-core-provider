@@ -111,6 +111,14 @@ type DeployOptions struct {
 	// as /call, so core-provider exchanges its projected SA token for an authn-issued service JWT
 	// and presents it as the Bearer. Empty ⇒ the /rbac call is unauthenticated (snowplow 401).
 	AuthnURL string
+	// SelfSAName / SelfSANamespace / SelfGroup identify core-provider's OWN ServiceAccount for its
+	// apiRefRBAC authn allowlist mapping — provisioned lazily (ensureSelfAuthnMapping) the first
+	// time a composition declares an apiRef, so core-provider can authenticate to snowplow /rbac.
+	// Set from CORE_PROVIDER_APIREF_SELF_SA_NAME / _NAMESPACE and CORE_PROVIDER_APIREF_GROUP. Empty
+	// SelfSAName disables self-provisioning (apiRefRBAC off).
+	SelfSAName      string
+	SelfSANamespace string
+	SelfGroup       string
 	// DryRunServer is used to determine if the deployment should be applied in dry-run mode. This is ignored in lookup mode
 	DryRunServer bool
 }
@@ -419,6 +427,14 @@ func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 	// When the CompositionDefinition declares an apiRef, register the CDC ServiceAccount in
 	// authn's allowlist so it can exchange its projected token for a service JWT.
 	err = applyAuthnServiceAccountMapping(ctx, opts.KubeClient, opts, sa.Name, sa.Namespace, &hsh, applyOpts)
+	if err != nil {
+		return "", err
+	}
+
+	// Ensure core-provider's OWN authn mapping exists before calling /rbac (which authenticates
+	// with core-provider's projected token). Provisioned at runtime — lazily, once authn is up —
+	// rather than declaratively at bootstrap, where the authn CRD does not yet exist.
+	err = ensureSelfAuthnMapping(ctx, opts.KubeClient, opts, applyOpts)
 	if err != nil {
 		return "", err
 	}

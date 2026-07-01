@@ -79,6 +79,15 @@ var (
 	// as /call, so core-provider exchanges its projected SA token for an authn-issued service JWT
 	// to authenticate. Override via CORE_PROVIDER_AUTHN_URL.
 	AuthnURL = envOr("CORE_PROVIDER_AUTHN_URL", "")
+
+	// SelfSAName / SelfSANamespace / SelfGroup identify core-provider's OWN ServiceAccount for its
+	// apiRefRBAC authn allowlist mapping. It is provisioned at runtime (the first time a
+	// composition declares an apiRef) rather than declaratively at bootstrap, where the authn CRD
+	// does not yet exist. The chart sets these when apiRefRBAC is enabled; empty SelfSAName
+	// disables self-provisioning.
+	SelfSAName      = envOr("CORE_PROVIDER_APIREF_SELF_SA_NAME", "")
+	SelfSANamespace = envOr("CORE_PROVIDER_APIREF_SELF_SA_NAMESPACE", "")
+	SelfGroup       = envOr("CORE_PROVIDER_APIREF_GROUP", "krateo:core-provider")
 )
 
 func envOr(key, def string) string {
@@ -727,6 +736,9 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 		AuthnNamespace:         AuthnNamespace,
 		SnowplowURL:            SnowplowURL,
 		AuthnURL:               AuthnURL,
+		SelfSAName:             SelfSAName,
+		SelfSANamespace:        SelfSANamespace,
+		SelfGroup:              SelfGroup,
 		DryRunServer:           true,
 	}
 	dig, err := deploy.Deploy(ctx, e.kube, opts)
@@ -873,6 +885,9 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) error {
 		AuthnNamespace:         AuthnNamespace,
 		SnowplowURL:            SnowplowURL,
 		AuthnURL:               AuthnURL,
+		SelfSAName:             SelfSAName,
+		SelfSANamespace:        SelfSANamespace,
+		SelfGroup:              SelfGroup,
 	}
 
 	dig, err := deploy.Deploy(ctx, e.kube, opts)
@@ -959,6 +974,9 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 		AuthnNamespace:         AuthnNamespace,
 		SnowplowURL:            SnowplowURL,
 		AuthnURL:               AuthnURL,
+		SelfSAName:             SelfSAName,
+		SelfSANamespace:        SelfSANamespace,
+		SelfGroup:              SelfGroup,
 	}
 
 	dig, err := deploy.Deploy(ctx, e.kube, opts)
