@@ -716,6 +716,13 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 
 	log.Debug("Searching for Dynamic Controller", "gvr", gvr)
 
+	// Seed the remote target before the dry-run deploy below: it projects the cdc into cr.Namespace
+	// on the spoke, so that namespace must exist there, and the shadow CompositionDefinition must be
+	// present for the projected cdc to resolve its package. Idempotent; no-op for local deployments.
+	if err := e.seedRemoteTargetIfNeeded(ctx, cr, gvr, chartGVK); err != nil {
+		return reconciler.ExternalObservation{}, fmt.Errorf("error seeding remote target: %w", err)
+	}
+
 	opts := deploy.DeployOptions{
 		RBACFolderPath:         CDCrbacConfigFolder,
 		DiscoveryClient:        memory.NewMemCacheClient(e.client.Discovery()),
@@ -865,6 +872,13 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) error {
 		return err
 	}
 
+	// Seed a remote target BEFORE deploying the cdc: Deploy projects the cdc into cr.Namespace on
+	// the spoke, so that namespace must already exist there; and the cdc resolves its package from
+	// a local shadow CompositionDefinition. No-op for local deployments.
+	if err := e.seedRemoteTargetIfNeeded(ctx, cr, gvr, gvk); err != nil {
+		return err
+	}
+
 	opts := deploy.DeployOptions{
 		RBACFolderPath:         CDCrbacConfigFolder,
 		DiscoveryClient:        memory.NewMemCacheClient(e.client.Discovery()),
@@ -902,6 +916,32 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) error {
 
 	cr.Status.Digest = dig
 
+	return nil
+}
+
+// seedRemoteTargetIfNeeded makes a projected cdc self-sufficient on a remote target (Path A, Inc 1):
+// when the CompositionDefinition deploys to a remote KubernetesTarget, core-provider does not run
+// there, so it projects the compositiondefinitions CRD + a status-only shadow CompositionDefinition
+// the cdc's package getter reads, plus the target namespace. No-op for local deployments.
+func (e *external) seedRemoteTargetIfNeeded(ctx context.Context, cr *compositiondefinitionsv1alpha1.CompositionDefinition, gvr schema.GroupVersionResource, gvk schema.GroupVersionKind) error {
+	if !clusterkube.IsRemote(cr.Spec.Deploy) {
+		return nil
+	}
+	pkgFS, err := chartfs.ForSpec(ctx, e.mgmt, cr.Spec.Chart)
+	if err != nil {
+		return fmt.Errorf("loading chart for remote seed: %w", err)
+	}
+	if err := deploy.SeedRemoteTarget(ctx, e.kube, e.dynamic, deploy.RemoteSeedOptions{
+		Namespace:  cr.Namespace,
+		CDName:     cr.Name,
+		Chart:      cr.Spec.Chart,
+		PackageURL: pkgFS.PackageURL(),
+		APIVersion: gvr.GroupVersion().String(),
+		Kind:       gvk.Kind,
+		Resource:   gvr.Resource,
+	}); err != nil {
+		return fmt.Errorf("seeding remote target: %w", err)
+	}
 	return nil
 }
 
@@ -954,6 +994,12 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 		return err
 	}
 
+	// Seed the remote target BEFORE deploying the cdc (namespace must exist for the cdc; shadow
+	// CompositionDefinition must exist for the cdc's package getter). No-op for local deployments.
+	if err := e.seedRemoteTargetIfNeeded(ctx, cr, gvr, gvk); err != nil {
+		return err
+	}
+
 	opts := deploy.DeployOptions{
 		RBACFolderPath:         CDCrbacConfigFolder,
 		DiscoveryClient:        memory.NewMemCacheClient(e.client.Discovery()),
@@ -990,6 +1036,7 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 		"gvr", gvr.String(),
 		"namespace", cr.Namespace,
 	)
+
 	oldGVK := schema.FromAPIVersionAndKind(cr.Status.ApiVersion, cr.Status.Kind)
 	oldGVR := oldGVK.GroupVersion().WithResource(cr.Status.Resource)
 	// Undeploy olders versions of the CRD

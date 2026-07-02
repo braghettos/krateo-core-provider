@@ -1,0 +1,145 @@
+package deploy
+
+import (
+	"context"
+	_ "embed"
+	"fmt"
+	"time"
+
+	compositiondefinitionsv1alpha1 "github.com/krateoplatformops/core-provider/apis/compositiondefinitions/v1alpha1"
+	kubecli "github.com/krateoplatformops/core-provider/internal/tools/kube"
+	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/yaml"
+)
+
+// compositiondefinitions CRD, shipped as an asset so it can be projected onto a remote target
+// where core-provider does NOT run (and therefore never installs its own CRDs).
+//
+//go:embed assets/compositiondefinitions-crd.yaml
+var compositionDefinitionCRDBytes []byte
+
+var compositionDefinitionGVR = schema.GroupVersionResource{
+	Group:    "core.krateo.io",
+	Version:  "v1alpha1",
+	Resource: "compositiondefinitions",
+}
+
+// RemoteSeedOptions is what a spoke needs so a projected cdc can resolve a package locally. The
+// composition coordinates (APIVersion/Kind/Resource) are the GENERATED composition's (e.g.
+// composition.krateo.io/v0-1-0, DemoApp, demoapps) — the same values RefreshCompositionDefinitionStatus
+// records on the hub CR.
+type RemoteSeedOptions struct {
+	Namespace  string
+	CDName     string
+	Chart      *compositiondefinitionsv1alpha1.ChartInfo
+	PackageURL string
+	APIVersion string
+	Kind       string
+	Resource   string
+}
+
+// SeedRemoteTarget makes a spoke self-sufficient for a projected cdc (Path A, Inc 1). The projected
+// cdc resolves a package by LISTING compositiondefinitions.core.krateo.io in its OWN cluster and
+// reading status.packageUrl (cdc internal/tools/archive/getter.go). core-provider does not run on
+// the spoke, so nothing puts that CRD or a CR there — this does:
+//
+//	(B) ensure the target namespace,
+//	(C) install the compositiondefinitions CRD, then create a status-only "shadow"
+//	    CompositionDefinition carrying exactly what the getter reads.
+//
+// Idempotent; applied through the spoke-swapped clients. The shadow is bait for the getter — no
+// controller reconciles it on the spoke, so its status persists. Deliberately NOT part of the
+// composition deploy digest (it is target infrastructure, not per-composition state).
+func SeedRemoteTarget(ctx context.Context, kube client.Client, dyn dynamic.Interface, opts RemoteSeedOptions) error {
+	// B — target namespace. TypeMeta is set explicitly: kubecli.Apply reads the GVK off the object,
+	// and a struct-literal typed object carries none.
+	ns := &corev1.Namespace{
+		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "Namespace"},
+		ObjectMeta: metav1.ObjectMeta{Name: opts.Namespace},
+	}
+	if err := kubecli.Apply(ctx, kube, ns, kubecli.ApplyOptions{}); err != nil {
+		return fmt.Errorf("ensuring target namespace %q: %w", opts.Namespace, err)
+	}
+
+	// C.1 — the compositiondefinitions CRD, then wait until the API is served.
+	crd := &apiextensionsv1.CustomResourceDefinition{}
+	if err := yaml.Unmarshal(compositionDefinitionCRDBytes, crd); err != nil {
+		return fmt.Errorf("decoding embedded compositiondefinitions CRD: %w", err)
+	}
+	if err := kubecli.Apply(ctx, kube, crd, kubecli.ApplyOptions{}); err != nil {
+		return fmt.Errorf("installing compositiondefinitions CRD on target: %w", err)
+	}
+	if err := waitCRDServed(ctx, dyn, compositionDefinitionGVR, 30*time.Second); err != nil {
+		return fmt.Errorf("waiting for compositiondefinitions CRD to be served on target: %w", err)
+	}
+
+	// C.2 — the shadow CompositionDefinition: spec mirrors the chart, status carries what the
+	// getter reads (packageUrl + the composition apiVersion/kind/resource).
+	chartMap, err := runtime.DefaultUnstructuredConverter.ToUnstructured(opts.Chart)
+	if err != nil {
+		return fmt.Errorf("encoding chart spec for shadow CompositionDefinition: %w", err)
+	}
+
+	res := dyn.Resource(compositionDefinitionGVR).Namespace(opts.Namespace)
+	live, err := res.Get(ctx, opts.CDName, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		shadow := &unstructured.Unstructured{}
+		shadow.SetAPIVersion("core.krateo.io/v1alpha1")
+		shadow.SetKind("CompositionDefinition")
+		shadow.SetNamespace(opts.Namespace)
+		shadow.SetName(opts.CDName)
+		if err := unstructured.SetNestedMap(shadow.Object, chartMap, "spec", "chart"); err != nil {
+			return fmt.Errorf("building shadow CompositionDefinition spec: %w", err)
+		}
+		if live, err = res.Create(ctx, shadow, metav1.CreateOptions{}); err != nil {
+			return fmt.Errorf("creating shadow CompositionDefinition: %w", err)
+		}
+	} else if err != nil {
+		return fmt.Errorf("reading shadow CompositionDefinition: %w", err)
+	} else {
+		if err := unstructured.SetNestedMap(live.Object, chartMap, "spec", "chart"); err != nil {
+			return fmt.Errorf("updating shadow CompositionDefinition spec: %w", err)
+		}
+		if live, err = res.Update(ctx, live, metav1.UpdateOptions{}); err != nil {
+			return fmt.Errorf("updating shadow CompositionDefinition: %w", err)
+		}
+	}
+
+	// status subresource — the fields the cdc getter reads.
+	_ = unstructured.SetNestedField(live.Object, opts.PackageURL, "status", "packageUrl")
+	_ = unstructured.SetNestedField(live.Object, opts.APIVersion, "status", "apiVersion")
+	_ = unstructured.SetNestedField(live.Object, opts.Kind, "status", "kind")
+	_ = unstructured.SetNestedField(live.Object, opts.Resource, "status", "resource")
+	if _, err := res.UpdateStatus(ctx, live, metav1.UpdateOptions{}); err != nil {
+		return fmt.Errorf("setting shadow CompositionDefinition status: %w", err)
+	}
+	return nil
+}
+
+// waitCRDServed polls until the given resource is served by the target API (the CRD is Established),
+// so the subsequent shadow-CR create does not race CRD registration.
+func waitCRDServed(ctx context.Context, dyn dynamic.Interface, gvr schema.GroupVersionResource, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		_, err := dyn.Resource(gvr).Namespace("").List(ctx, metav1.ListOptions{Limit: 1})
+		if err == nil {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+}
