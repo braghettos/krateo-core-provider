@@ -935,6 +935,20 @@ func (e *external) seedRemoteTargetIfNeeded(ctx context.Context, cr *composition
 	if err != nil {
 		return fmt.Errorf("loading chart for remote seed: %w", err)
 	}
+
+	// C2 — packageURL reachability. The resolved chart URL is passed through to the projected cdc
+	// unchanged, so it must be reachable FROM the spoke. A cluster-local URL (a management-cluster
+	// Service DNS / localhost / private IP) resolves on the hub but not on the spoke, so the
+	// composition would silently fail. Surface it as a condition instead of projecting it.
+	if pkgURL := pkgFS.PackageURL(); deploy.IsClusterLocalChartURL(pkgURL) {
+		cond := rtv1.Unavailable().WithMessage(fmt.Sprintf(
+			"chart %q is cluster-local to the management cluster and unreachable from the remote target; "+
+				"publish it to a spoke-reachable registry (public OCI/HTTPS)", pkgURL))
+		cond.Reason = "RemoteChartUnreachable"
+		cr.SetConditions(cond)
+		return fmt.Errorf("remote chart %q is cluster-local and unreachable from the target", pkgURL)
+	}
+
 	if err := deploy.SeedRemoteTarget(ctx, e.kube, e.dynamic, deploy.RemoteSeedOptions{
 		Namespace:  cr.Namespace,
 		CDName:     cr.Name,
