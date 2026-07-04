@@ -15,7 +15,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/yaml"
 )
 
 // ChartInspectorCoords locate the core-provider chart-inspector Service that a cdc's
@@ -29,22 +28,29 @@ type ChartInspectorCoords struct {
 	Port      int32
 }
 
-// ChartInspectorCoordsFromConfigmapTemplate parses the cdc-configmap template (mounted from the
+// ChartInspectorCoordsFromConfigmapTemplate reads the cdc-configmap template (mounted from the
 // core-provider chart) for URL_CHART_INSPECTOR and derives the Service {name,namespace,port}. That
 // URL is the single source of truth core-provider already uses to wire every cdc, so Inc 2
 // introduces no new configuration — it reuses what the chart set.
+//
+// The file is a Go TEMPLATE (unrendered {{ }} directives), so it is NOT valid YAML — the
+// URL_CHART_INSPECTOR value is a static Service DNS, extracted here by line rather than parsed.
 func ChartInspectorCoordsFromConfigmapTemplate(path string) (ChartInspectorCoords, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return ChartInspectorCoords{}, fmt.Errorf("reading cdc-configmap template %q: %w", path, err)
 	}
-	var cm corev1.ConfigMap
-	if err := yaml.Unmarshal(raw, &cm); err != nil {
-		return ChartInspectorCoords{}, fmt.Errorf("decoding cdc-configmap template %q: %w", path, err)
+	const key = "URL_CHART_INSPECTOR:"
+	rawURL := ""
+	for _, line := range strings.Split(string(raw), "\n") {
+		t := strings.TrimSpace(line)
+		if strings.HasPrefix(t, key) {
+			rawURL = strings.Trim(strings.TrimSpace(strings.TrimPrefix(t, key)), `"'`)
+			break
+		}
 	}
-	rawURL := cm.Data["URL_CHART_INSPECTOR"]
 	if rawURL == "" {
-		return ChartInspectorCoords{}, fmt.Errorf("URL_CHART_INSPECTOR not set in cdc-configmap template %q", path)
+		return ChartInspectorCoords{}, fmt.Errorf("URL_CHART_INSPECTOR not found in cdc-configmap template %q", path)
 	}
 	return parseChartInspectorURL(rawURL)
 }

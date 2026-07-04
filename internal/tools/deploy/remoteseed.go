@@ -151,8 +151,11 @@ func TeardownRemoteSeed(ctx context.Context, kube client.Client, dyn dynamic.Int
 		return fmt.Errorf("deleting shadow CompositionDefinition %q: %w", opts.CDName, err)
 	}
 
-	// 2 — ref-count. Any shadow CDs (not already terminating) still on the spoke keep the shared
-	// infrastructure alive.
+	// 2 — ref-count. The chart-inspector + CD CRD stay while ANY OTHER remote composition still has a
+	// shadow CD on the spoke. Exclude THIS CD's own shadow (whether or not the delete above is yet
+	// visible to the list) and any already-terminating shadow — otherwise the last-one-out cleanup
+	// races our own delete: on the reconcile that removes the finalizer, a list that still shows our
+	// just-deleted shadow would wrongly keep the shared infra, and no further reconcile retries.
 	list, err := res.Namespace(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		if apierrors.IsNotFound(err) || meta.IsNoMatchError(err) {
@@ -161,9 +164,14 @@ func TeardownRemoteSeed(ctx context.Context, kube client.Client, dyn dynamic.Int
 		return fmt.Errorf("listing shadow CompositionDefinitions on target: %w", err)
 	}
 	for i := range list.Items {
-		if list.Items[i].GetDeletionTimestamp() == nil {
-			return nil // another remote composition still needs the chart-inspector + CD CRD
+		it := &list.Items[i]
+		if it.GetNamespace() == opts.Namespace && it.GetName() == opts.CDName {
+			continue // this CD's own shadow (the delete above may not be visible yet)
 		}
+		if it.GetDeletionTimestamp() != nil {
+			continue // already terminating
+		}
+		return nil // another remote composition still needs the chart-inspector + CD CRD
 	}
 
 	// 3 — last one out: remove the shared chart-inspector set and the compositiondefinitions CRD.
