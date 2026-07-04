@@ -276,6 +276,49 @@ func referencedConfig(ps *corev1.PodSpec) (cms []string, secrets []string) {
 	return cms, secrets
 }
 
+// DeleteProjectedChartInspector removes the chart-inspector set projected onto a spoke (the reverse
+// of ProjectChartInspector). Call it only once the last remote composition on the spoke is gone
+// (the caller ref-counts). Idempotent — a NotFound on any object is ignored. The referenced
+// ConfigMap shares the chart-inspector name, so it is removed with the namespaced set.
+func DeleteProjectedChartInspector(ctx context.Context, spoke client.Client, coords ChartInspectorCoords) error {
+	del := func(obj client.Object, what string) error {
+		if err := spoke.Delete(ctx, obj); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("deleting chart-inspector %s: %w", what, err)
+		}
+		return nil
+	}
+
+	// cluster-scoped RBAC first (found by the SA it binds).
+	if crb, err := findChartInspectorCRB(ctx, spoke, coords); err != nil {
+		return err
+	} else if crb != nil {
+		cr := &rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: crb.RoleRef.Name}}
+		if err := del(cr, "ClusterRole"); err != nil {
+			return err
+		}
+		b := &rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: crb.Name}}
+		if err := del(b, "ClusterRoleBinding"); err != nil {
+			return err
+		}
+	}
+
+	nn := metav1.ObjectMeta{Name: coords.Name, Namespace: coords.Namespace}
+	for _, o := range []struct {
+		obj  client.Object
+		what string
+	}{
+		{&corev1.Service{ObjectMeta: nn}, "Service"},
+		{&appsv1.Deployment{ObjectMeta: nn}, "Deployment"},
+		{&corev1.ConfigMap{ObjectMeta: nn}, "ConfigMap"},
+		{&corev1.ServiceAccount{ObjectMeta: nn}, "ServiceAccount"},
+	} {
+		if err := del(o.obj, o.what); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // findChartInspectorCRB returns the ClusterRoleBinding whose subjects include the chart-inspector
 // ServiceAccount, or nil when the chart-inspector needs no cluster RBAC.
 func findChartInspectorCRB(ctx context.Context, mgmt client.Client, coords ChartInspectorCoords) (*rbacv1.ClusterRoleBinding, error) {

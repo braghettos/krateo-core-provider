@@ -974,6 +974,28 @@ func (e *external) seedRemoteTargetIfNeeded(ctx context.Context, cr *composition
 	return nil
 }
 
+// teardownRemoteSeedIfNeeded reverses the remote seed when a remote CompositionDefinition is deleted:
+// it removes this CD's shadow CompositionDefinition on the spoke and, ref-counted by the shadow CDs
+// still present there, the SHARED chart-inspector set and the compositiondefinitions CRD (only when
+// this was the last remote composition on the target). No-op for local deployments.
+func (e *external) teardownRemoteSeedIfNeeded(ctx context.Context, cr *compositiondefinitionsv1alpha1.CompositionDefinition) error {
+	if !clusterkube.IsRemote(cr.Spec.Deploy) {
+		return nil
+	}
+	coords, err := deploy.ChartInspectorCoordsFromConfigmapTemplate(CDCtemplateConfigmapPath)
+	if err != nil {
+		return fmt.Errorf("resolving chart-inspector coordinates for remote teardown: %w", err)
+	}
+	if err := deploy.TeardownRemoteSeed(ctx, e.kube, e.dynamic, deploy.RemoteSeedTeardownOptions{
+		Namespace:      cr.Namespace,
+		CDName:         cr.Name,
+		ChartInspector: coords,
+	}); err != nil {
+		return fmt.Errorf("tearing down remote seed: %w", err)
+	}
+	return nil
+}
+
 func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 	cr, ok := mg.(*compositiondefinitionsv1alpha1.CompositionDefinition)
 	if !ok {
@@ -1255,6 +1277,12 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
 		}
 	} else {
 		log.Debug("CRD not found, deletion has already been completed", "gvk", gvk.String())
+	}
+
+	// Remote teardown: clean the spoke-side seed (shadow CD + ref-counted chart-inspector / CD CRD).
+	// No-op for local deployments. Runs after Undeploy so the cdc is gone first.
+	if err := e.teardownRemoteSeedIfNeeded(ctx, cr); err != nil {
+		return err
 	}
 
 	return nil
