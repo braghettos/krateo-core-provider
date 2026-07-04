@@ -12,6 +12,7 @@ import (
 	"github.com/go-logr/logr"
 
 	"github.com/krateoplatformops/core-provider/internal/controllers/compositiondefinitions"
+	"github.com/krateoplatformops/core-provider/internal/controllers/kubernetestargets"
 	"github.com/krateoplatformops/core-provider/internal/tools/loghandler"
 	"github.com/krateoplatformops/core-provider/internal/tools/pluralizer"
 	"github.com/krateoplatformops/plumbing/env"
@@ -171,6 +172,12 @@ func main() {
 		Pluralizer:        pluralizer.New(false),
 	}); err != nil {
 		log.Error(err, "Cannot setup controllers")
+		os.Exit(1)
+	}
+	if err := kubernetestargets.Setup(mgr, kubernetestargets.Options{
+		ControllerOptions: o,
+	}); err != nil {
+		log.Error(err, "Cannot setup KubernetesTarget controller")
 		os.Exit(1)
 	}
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {

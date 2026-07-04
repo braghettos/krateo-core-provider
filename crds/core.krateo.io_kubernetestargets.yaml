@@ -17,7 +17,17 @@ spec:
     singular: kubernetestarget
   scope: Cluster
   versions:
-  - name: v1alpha1
+  - additionalPrinterColumns:
+    - jsonPath: .status.connectionStatus
+      name: CONNECTION
+      type: string
+    - jsonPath: .status.version
+      name: VERSION
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
+    name: v1alpha1
     schema:
       openAPIV3Schema:
         description: |-
@@ -68,6 +78,70 @@ spec:
             required:
             - kubeconfigRef
             type: object
+          status:
+            description: |-
+              KubernetesTargetStatus reports the observed reachability of the target cluster, refreshed by the
+              KubernetesTarget reachability reconciler. It turns the passive reference into a registered spoke
+              with lifecycle: a Ready condition, the reported Kubernetes version, and the credential the last
+              probe used (for rotation traceability).
+            properties:
+              conditions:
+                description: Conditions of the resource.
+                items:
+                  description: A Condition that may apply to a resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        LastTransitionTime is the last time this condition transitioned from one
+                        status to another.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        A Message containing details about this condition's last transition from
+                        one status to another, if any.
+                      type: string
+                    reason:
+                      description: A Reason for this condition's last transition from
+                        one status to another.
+                      type: string
+                    status:
+                      description: Status of this condition; is it currently True,
+                        False, or Unknown?
+                      type: string
+                    type:
+                      description: |-
+                        Type of this condition. At most one of each condition type may apply to
+                        a resource at any point in time.
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              connectionStatus:
+                description: ConnectionStatus is Healthy when the target cluster's
+                  API is reachable, Down otherwise.
+                type: string
+              kubeconfigSecretResourceVersion:
+                description: |-
+                  KubeconfigSecretResourceVersion is the resourceVersion of the kubeconfig Secret used by the
+                  last successful probe, for rotation traceability.
+                type: string
+              lastProbeTime:
+                description: LastProbeTime is when the target's reachability was last
+                  checked.
+                format: date-time
+                type: string
+              version:
+                description: Version is the Kubernetes version reported by the target
+                  cluster on the last successful probe.
+                type: string
+            type: object
         type: object
     served: true
     storage: true
+    subresources:
+      status: {}

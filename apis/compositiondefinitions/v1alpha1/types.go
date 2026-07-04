@@ -194,8 +194,37 @@ type KubernetesTargetSpec struct {
 	KubeconfigRef rtv1.SecretKeySelector `json:"kubeconfigRef"`
 }
 
+// KubernetesTargetStatus reports the observed reachability of the target cluster, refreshed by the
+// KubernetesTarget reachability reconciler. It turns the passive reference into a registered spoke
+// with lifecycle: a Ready condition, the reported Kubernetes version, and the credential the last
+// probe used (for rotation traceability).
+type KubernetesTargetStatus struct {
+	rtv1.ConditionedStatus `json:",inline"`
+
+	// ConnectionStatus is Healthy when the target cluster's API is reachable, Down otherwise.
+	// +optional
+	ConnectionStatus string `json:"connectionStatus,omitempty"`
+
+	// Version is the Kubernetes version reported by the target cluster on the last successful probe.
+	// +optional
+	Version string `json:"version,omitempty"`
+
+	// KubeconfigSecretResourceVersion is the resourceVersion of the kubeconfig Secret used by the
+	// last successful probe, for rotation traceability.
+	// +optional
+	KubeconfigSecretResourceVersion string `json:"kubeconfigSecretResourceVersion,omitempty"`
+
+	// LastProbeTime is when the target's reachability was last checked.
+	// +optional
+	LastProbeTime *metav1.Time `json:"lastProbeTime,omitempty"`
+}
+
 //+kubebuilder:object:root=true
+//+kubebuilder:subresource:status
 //+kubebuilder:resource:scope=Cluster,categories={krateo,core}
+//+kubebuilder:printcolumn:name="CONNECTION",type="string",JSONPath=".status.connectionStatus"
+//+kubebuilder:printcolumn:name="VERSION",type="string",JSONPath=".status.version"
+//+kubebuilder:printcolumn:name="AGE",type="date",JSONPath=".metadata.creationTimestamp"
 
 // KubernetesTarget is a cluster-scoped reference to a remote cluster, used by a
 // CompositionDefinition's spec.deploy.targetRef to deploy compositions remotely.
@@ -204,6 +233,8 @@ type KubernetesTarget struct {
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
 	Spec KubernetesTargetSpec `json:"spec,omitempty"`
+	// +optional
+	Status KubernetesTargetStatus `json:"status,omitempty"`
 }
 
 //+kubebuilder:object:root=true
