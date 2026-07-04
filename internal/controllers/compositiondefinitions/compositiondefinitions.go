@@ -919,10 +919,14 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) error {
 	return nil
 }
 
-// seedRemoteTargetIfNeeded makes a projected cdc self-sufficient on a remote target (Path A, Inc 1):
-// when the CompositionDefinition deploys to a remote KubernetesTarget, core-provider does not run
-// there, so it projects the compositiondefinitions CRD + a status-only shadow CompositionDefinition
-// the cdc's package getter reads, plus the target namespace. No-op for local deployments.
+// seedRemoteTargetIfNeeded makes a projected cdc self-sufficient on a remote target. No-op for
+// local deployments. When the CompositionDefinition deploys to a remote KubernetesTarget,
+// core-provider does not run there, so it seeds what the cdc needs but nothing else installs:
+//   - Inc 1: the compositiondefinitions CRD + a status-only shadow CompositionDefinition (the cdc's
+//     package getter reads it) + the target namespace.
+//   - Inc 2: the chart-inspector workload (SA/RBAC/Deployment/Service), read from the management
+//     cluster and projected under the same name/namespace, so the cdc's baked URL_CHART_INSPECTOR
+//     resolves locally on the spoke.
 func (e *external) seedRemoteTargetIfNeeded(ctx context.Context, cr *compositiondefinitionsv1alpha1.CompositionDefinition, gvr schema.GroupVersionResource, gvk schema.GroupVersionKind) error {
 	if !clusterkube.IsRemote(cr.Spec.Deploy) {
 		return nil
@@ -941,6 +945,17 @@ func (e *external) seedRemoteTargetIfNeeded(ctx context.Context, cr *composition
 		Resource:   gvr.Resource,
 	}); err != nil {
 		return fmt.Errorf("seeding remote target: %w", err)
+	}
+
+	// Inc 2 — project the chart-inspector so the projected cdc's URL_CHART_INSPECTOR (a management-
+	// cluster Service DNS baked into its ConfigMap) resolves on the spoke. Coordinates come from the
+	// same cdc-configmap template core-provider uses to wire every cdc, so no new config is needed.
+	coords, err := deploy.ChartInspectorCoordsFromConfigmapTemplate(CDCtemplateConfigmapPath)
+	if err != nil {
+		return fmt.Errorf("resolving chart-inspector coordinates for remote seed: %w", err)
+	}
+	if err := deploy.ProjectChartInspector(ctx, e.mgmt, e.kube, coords); err != nil {
+		return fmt.Errorf("projecting chart-inspector to remote target: %w", err)
 	}
 	return nil
 }
