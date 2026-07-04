@@ -13,6 +13,7 @@ import (
 
 	"github.com/krateoplatformops/core-provider/internal/controllers/compositiondefinitions"
 	"github.com/krateoplatformops/core-provider/internal/controllers/kubernetestargets"
+	"github.com/krateoplatformops/core-provider/internal/controllers/remoteinstalls"
 	"github.com/krateoplatformops/core-provider/internal/tools/loghandler"
 	"github.com/krateoplatformops/core-provider/internal/tools/pluralizer"
 	"github.com/krateoplatformops/plumbing/env"
@@ -178,6 +179,12 @@ func main() {
 		ControllerOptions: o,
 	}); err != nil {
 		log.Error(err, "Cannot setup KubernetesTarget controller")
+		os.Exit(1)
+	}
+	if err := remoteinstalls.Setup(mgr, remoteinstalls.Options{
+		ControllerOptions: o,
+	}); err != nil {
+		log.Error(err, "Cannot setup RemoteInstall controller")
 		os.Exit(1)
 	}
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {

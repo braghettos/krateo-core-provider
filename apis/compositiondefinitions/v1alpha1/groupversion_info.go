@@ -35,4 +35,5 @@ var (
 func init() {
 	SchemeBuilder.Register(&CompositionDefinition{}, &CompositionDefinitionList{})
 	SchemeBuilder.Register(&KubernetesTarget{}, &KubernetesTargetList{})
+	SchemeBuilder.Register(&RemoteInstall{}, &RemoteInstallList{})
 }

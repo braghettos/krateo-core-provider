@@ -1,0 +1,200 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.1
+  name: remoteinstalls.core.krateo.io
+spec:
+  group: core.krateo.io
+  names:
+    categories:
+    - krateo
+    - core
+    kind: RemoteInstall
+    listKind: RemoteInstallList
+    plural: remoteinstalls
+    singular: remoteinstall
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: PHASE
+      type: string
+    - jsonPath: .spec.targetRef.name
+      name: TARGET
+      type: string
+    - jsonPath: .status.targetConnection
+      name: CONNECTION
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          RemoteInstall installs a composition/umbrella chart onto a remote spoke as a single declarative
+          object: it owns a remote-targeted CompositionDefinition and reports rollup status.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              RemoteInstallSpec declares "install this chart on this spoke" as one object: the controller owns a
+              remote-targeted CompositionDefinition wiring the chart to the referenced KubernetesTarget.
+            properties:
+              chart:
+                description: Chart is the composition/umbrella chart to install on
+                  the spoke.
+                properties:
+                  credentials:
+                    description: 'Credentials: credentials for private repos'
+                    properties:
+                      passwordRef:
+                        description: 'PasswordRef: reference to secret containing
+                          password for private repo'
+                        properties:
+                          key:
+                            description: The key to select.
+                            type: string
+                          name:
+                            description: Name of the referenced object.
+                            type: string
+                          namespace:
+                            description: Namespace of the referenced object.
+                            type: string
+                        required:
+                        - key
+                        - name
+                        - namespace
+                        type: object
+                      username:
+                        description: 'Username: username for private repo'
+                        type: string
+                    required:
+                    - passwordRef
+                    - username
+                    type: object
+                  insecureSkipVerifyTLS:
+                    description: 'InsecureSkipVerifyTLS: skip tls verification'
+                    type: boolean
+                  repo:
+                    description: |-
+                      Repo: Helm repo name
+                      Should be set only for helm repo urls
+                      If specified with OCI registries, it will be used as the repository name, instead the URL should contain the full path to the chart.
+                      This is ignored for tgz archives
+                    maxLength: 256
+                    type: string
+                  url:
+                    description: 'Url: oci or tgz full url'
+                    type: string
+                  version:
+                    description: 'Version: desired chart version, needed for oci charts
+                      and for helm repo urls'
+                    maxLength: 20
+                    type: string
+                required:
+                - url
+                type: object
+                x-kubernetes-validations:
+                - message: Version is required once set
+                  rule: '!has(oldSelf.version) || has(self.version)'
+                - message: Repo is required once set
+                  rule: '!has(oldSelf.repo) || has(self.repo)'
+              targetRef:
+                description: TargetRef selects the cluster-scoped KubernetesTarget
+                  (the spoke) to install onto.
+                properties:
+                  name:
+                    description: Name of the cluster-scoped KubernetesTarget.
+                    type: string
+                required:
+                - name
+                type: object
+              values:
+                description: |-
+                  Values are the composition instance's spec values (e.g. installer bootstrap values), applied on
+                  the spoke once the CompositionDefinition is Ready. Reserved for the instance step.
+                type: object
+                x-kubernetes-preserve-unknown-fields: true
+            required:
+            - chart
+            - targetRef
+            type: object
+          status:
+            description: RemoteInstallStatus mirrors the managed CompositionDefinition
+              and the target's reachability.
+            properties:
+              compositionDefinition:
+                description: CompositionDefinition names the CompositionDefinition
+                  this RemoteInstall manages.
+                type: string
+              conditions:
+                description: Conditions of the resource.
+                items:
+                  description: A Condition that may apply to a resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        LastTransitionTime is the last time this condition transitioned from one
+                        status to another.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        A Message containing details about this condition's last transition from
+                        one status to another, if any.
+                      type: string
+                    reason:
+                      description: A Reason for this condition's last transition from
+                        one status to another.
+                      type: string
+                    status:
+                      description: Status of this condition; is it currently True,
+                        False, or Unknown?
+                      type: string
+                    type:
+                      description: |-
+                        Type of this condition. At most one of each condition type may apply to
+                        a resource at any point in time.
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              phase:
+                description: 'Phase is a coarse rollup: Pending, Installing, Ready
+                  or Failed.'
+                type: string
+              targetConnection:
+                description: TargetConnection mirrors the KubernetesTarget's connectionStatus
+                  (Healthy/Down).
+                type: string
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
