@@ -935,6 +935,20 @@ func (e *external) seedRemoteTargetIfNeeded(ctx context.Context, cr *composition
 	if err != nil {
 		return fmt.Errorf("loading chart for remote seed: %w", err)
 	}
+
+	// C2 — packageURL reachability. The resolved chart URL is passed through to the projected cdc
+	// unchanged, so it must be reachable FROM the spoke. A cluster-local URL (a management-cluster
+	// Service DNS / localhost / private IP) resolves on the hub but not on the spoke, so the
+	// composition would silently fail. Surface it as a condition instead of projecting it.
+	if pkgURL := pkgFS.PackageURL(); deploy.IsClusterLocalChartURL(pkgURL) {
+		cond := rtv1.Unavailable().WithMessage(fmt.Sprintf(
+			"chart %q is cluster-local to the management cluster and unreachable from the remote target; "+
+				"publish it to a spoke-reachable registry (public OCI/HTTPS)", pkgURL))
+		cond.Reason = "RemoteChartUnreachable"
+		cr.SetConditions(cond)
+		return fmt.Errorf("remote chart %q is cluster-local and unreachable from the target", pkgURL)
+	}
+
 	if err := deploy.SeedRemoteTarget(ctx, e.kube, e.dynamic, deploy.RemoteSeedOptions{
 		Namespace:  cr.Namespace,
 		CDName:     cr.Name,
@@ -956,6 +970,28 @@ func (e *external) seedRemoteTargetIfNeeded(ctx context.Context, cr *composition
 	}
 	if err := deploy.ProjectChartInspector(ctx, e.mgmt, e.kube, coords); err != nil {
 		return fmt.Errorf("projecting chart-inspector to remote target: %w", err)
+	}
+	return nil
+}
+
+// teardownRemoteSeedIfNeeded reverses the remote seed when a remote CompositionDefinition is deleted:
+// it removes this CD's shadow CompositionDefinition on the spoke and, ref-counted by the shadow CDs
+// still present there, the SHARED chart-inspector set and the compositiondefinitions CRD (only when
+// this was the last remote composition on the target). No-op for local deployments.
+func (e *external) teardownRemoteSeedIfNeeded(ctx context.Context, cr *compositiondefinitionsv1alpha1.CompositionDefinition) error {
+	if !clusterkube.IsRemote(cr.Spec.Deploy) {
+		return nil
+	}
+	coords, err := deploy.ChartInspectorCoordsFromConfigmapTemplate(CDCtemplateConfigmapPath)
+	if err != nil {
+		return fmt.Errorf("resolving chart-inspector coordinates for remote teardown: %w", err)
+	}
+	if err := deploy.TeardownRemoteSeed(ctx, e.kube, e.dynamic, deploy.RemoteSeedTeardownOptions{
+		Namespace:      cr.Namespace,
+		CDName:         cr.Name,
+		ChartInspector: coords,
+	}); err != nil {
+		return fmt.Errorf("tearing down remote seed: %w", err)
 	}
 	return nil
 }
@@ -1241,6 +1277,12 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
 		}
 	} else {
 		log.Debug("CRD not found, deletion has already been completed", "gvk", gvk.String())
+	}
+
+	// Remote teardown: clean the spoke-side seed (shadow CD + ref-counted chart-inspector / CD CRD).
+	// No-op for local deployments. Runs after Undeploy so the cdc is gone first.
+	if err := e.teardownRemoteSeedIfNeeded(ctx, cr); err != nil {
+		return err
 	}
 
 	return nil

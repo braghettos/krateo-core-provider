@@ -44,9 +44,14 @@ rules:
       - delete
   - apiGroups:
       - ""
+    # namespaces: the seed ensures cr.Namespace (Inc 1) and the chart-inspector namespace (Inc 2)
+    # exist on the target before projecting into them. secrets: a projected workload (e.g.
+    # chart-inspector) may reference Secrets that Inc 2 projects alongside its ConfigMaps.
     resources:
+      - namespaces
       - serviceaccounts
       - configmaps
+      - secrets
       - services
     verbs:
       - create

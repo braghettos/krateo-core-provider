@@ -180,3 +180,30 @@ helm install krateo-core-provider-target oci://<registry>/krateo-core-provider-t
 **Requirement:** the GA `MutatingAdmissionPolicy` API (`admissionregistration.k8s.io/v1`)
 needs **Kubernetes ≥ 1.36** on the management cluster **and every target**. See
 [`../design/multicluster-compositions.md`](../design/multicluster-compositions.md).
+
+## Chart URL reachability (remote targets)
+
+The composition's chart `packageURL` is resolved on the **management** cluster and passed through to
+the projected `composition-dynamic-controller` **unchanged**. The cdc runs on the **target**, so the
+chart URL must be reachable **from the target**:
+
+- ✅ Public OCI / HTTPS registries (`ghcr.io`, `registry-1.docker.io`, a public chart host).
+- ❌ A management-cluster-local URL — a Service DNS (`*.svc`, `*.cluster.local`), `localhost`, or a
+  loopback / RFC-1918 / link-local IP — resolves on the hub but **not** on the spoke.
+
+core-provider validates this: when a `CompositionDefinition` targets a remote cluster and the resolved
+chart URL is cluster-local, it does **not** project the composition and instead sets an
+`Unavailable` condition with reason **`RemoteChartUnreachable`** on the CR:
+
+```
+status.conditions:
+  - type: Ready
+    status: "False"
+    reason: RemoteChartUnreachable
+    message: 'chart "oci://...svc.cluster.local:5000/..." is cluster-local to the management
+      cluster and unreachable from the remote target; publish it to a spoke-reachable registry
+      (public OCI/HTTPS)'
+```
+
+**Fix:** publish the chart to a registry both clusters can reach. There is no in-cluster URL rewrite —
+mirroring a hub-local registry to the spoke is out of scope by design.

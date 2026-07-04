@@ -11,6 +11,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -120,6 +121,71 @@ func SeedRemoteTarget(ctx context.Context, kube client.Client, dyn dynamic.Inter
 	_ = unstructured.SetNestedField(live.Object, opts.Resource, "status", "resource")
 	if _, err := res.UpdateStatus(ctx, live, metav1.UpdateOptions{}); err != nil {
 		return fmt.Errorf("setting shadow CompositionDefinition status: %w", err)
+	}
+	return nil
+}
+
+// RemoteSeedTeardownOptions is what a spoke teardown needs: which shadow CompositionDefinition to
+// remove, and where the shared chart-inspector lives so it can be removed once no shadow CDs remain.
+type RemoteSeedTeardownOptions struct {
+	Namespace      string
+	CDName         string
+	ChartInspector ChartInspectorCoords
+}
+
+// TeardownRemoteSeed reverses SeedRemoteTarget + ProjectChartInspector when a remote hub CR is
+// deleted. It always removes this CD's shadow CompositionDefinition; then, ref-counted by the shadow
+// CDs still present on the spoke, it removes the SHARED chart-inspector set and the
+// compositiondefinitions CRD when this was the last remote composition on the target. Idempotent —
+// NotFound (incl. the CRD already gone) is treated as success. Applied through the spoke-swapped
+// clients.
+func TeardownRemoteSeed(ctx context.Context, kube client.Client, dyn dynamic.Interface, opts RemoteSeedTeardownOptions) error {
+	res := dyn.Resource(compositionDefinitionGVR)
+
+	// 1 — this CD's shadow CompositionDefinition.
+	err := res.Namespace(opts.Namespace).Delete(ctx, opts.CDName, metav1.DeleteOptions{})
+	if err != nil && !apierrors.IsNotFound(err) {
+		if meta.IsNoMatchError(err) {
+			return nil // the CRD is already gone, so nothing to tear down
+		}
+		return fmt.Errorf("deleting shadow CompositionDefinition %q: %w", opts.CDName, err)
+	}
+
+	// 2 — ref-count. The chart-inspector + CD CRD stay while ANY OTHER remote composition still has a
+	// shadow CD on the spoke. Exclude THIS CD's own shadow (whether or not the delete above is yet
+	// visible to the list) and any already-terminating shadow — otherwise the last-one-out cleanup
+	// races our own delete: on the reconcile that removes the finalizer, a list that still shows our
+	// just-deleted shadow would wrongly keep the shared infra, and no further reconcile retries.
+	list, err := res.Namespace(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) || meta.IsNoMatchError(err) {
+			return nil
+		}
+		return fmt.Errorf("listing shadow CompositionDefinitions on target: %w", err)
+	}
+	for i := range list.Items {
+		it := &list.Items[i]
+		if it.GetNamespace() == opts.Namespace && it.GetName() == opts.CDName {
+			continue // this CD's own shadow (the delete above may not be visible yet)
+		}
+		if it.GetDeletionTimestamp() != nil {
+			continue // already terminating
+		}
+		return nil // another remote composition still needs the chart-inspector + CD CRD
+	}
+
+	// 3 — last one out: remove the shared chart-inspector set and the compositiondefinitions CRD.
+	if err := DeleteProjectedChartInspector(ctx, kube, opts.ChartInspector); err != nil {
+		return err
+	}
+	crd := &apiextensionsv1.CustomResourceDefinition{
+		TypeMeta: metav1.TypeMeta{APIVersion: "apiextensions.k8s.io/v1", Kind: "CustomResourceDefinition"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: compositionDefinitionGVR.Resource + "." + compositionDefinitionGVR.Group,
+		},
+	}
+	if err := kube.Delete(ctx, crd); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("deleting compositiondefinitions CRD on target: %w", err)
 	}
 	return nil
 }
