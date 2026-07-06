@@ -5,6 +5,7 @@ import (
 	"github.com/krateoplatformops/provider-runtime/pkg/resource"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 // +kubebuilder:object:root=true
@@ -194,8 +195,37 @@ type KubernetesTargetSpec struct {
 	KubeconfigRef rtv1.SecretKeySelector `json:"kubeconfigRef"`
 }
 
+// KubernetesTargetStatus reports the observed reachability of the target cluster, refreshed by the
+// KubernetesTarget reachability reconciler. It turns the passive reference into a registered spoke
+// with lifecycle: a Ready condition, the reported Kubernetes version, and the credential the last
+// probe used (for rotation traceability).
+type KubernetesTargetStatus struct {
+	rtv1.ConditionedStatus `json:",inline"`
+
+	// ConnectionStatus is Healthy when the target cluster's API is reachable, Down otherwise.
+	// +optional
+	ConnectionStatus string `json:"connectionStatus,omitempty"`
+
+	// Version is the Kubernetes version reported by the target cluster on the last successful probe.
+	// +optional
+	Version string `json:"version,omitempty"`
+
+	// KubeconfigSecretResourceVersion is the resourceVersion of the kubeconfig Secret used by the
+	// last successful probe, for rotation traceability.
+	// +optional
+	KubeconfigSecretResourceVersion string `json:"kubeconfigSecretResourceVersion,omitempty"`
+
+	// LastProbeTime is when the target's reachability was last checked.
+	// +optional
+	LastProbeTime *metav1.Time `json:"lastProbeTime,omitempty"`
+}
+
 //+kubebuilder:object:root=true
+//+kubebuilder:subresource:status
 //+kubebuilder:resource:scope=Cluster,categories={krateo,core}
+//+kubebuilder:printcolumn:name="CONNECTION",type="string",JSONPath=".status.connectionStatus"
+//+kubebuilder:printcolumn:name="VERSION",type="string",JSONPath=".status.version"
+//+kubebuilder:printcolumn:name="AGE",type="date",JSONPath=".metadata.creationTimestamp"
 
 // KubernetesTarget is a cluster-scoped reference to a remote cluster, used by a
 // CompositionDefinition's spec.deploy.targetRef to deploy compositions remotely.
@@ -204,6 +234,8 @@ type KubernetesTarget struct {
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
 	Spec KubernetesTargetSpec `json:"spec,omitempty"`
+	// +optional
+	Status KubernetesTargetStatus `json:"status,omitempty"`
 }
 
 //+kubebuilder:object:root=true
@@ -327,4 +359,64 @@ func (mg *CompositionDefinition) SetConditions(c ...rtv1.Condition) {
 // GetCondition of this CompositionDefinition.
 func (mg *CompositionDefinition) GetCondition(ct rtv1.ConditionType) rtv1.Condition {
 	return mg.Status.GetCondition(ct)
+}
+
+// RemoteInstallSpec declares "install this chart on this spoke" as one object: the controller owns a
+// remote-targeted CompositionDefinition wiring the chart to the referenced KubernetesTarget.
+type RemoteInstallSpec struct {
+	// TargetRef selects the cluster-scoped KubernetesTarget (the spoke) to install onto.
+	TargetRef TargetReference `json:"targetRef"`
+
+	// Chart is the composition/umbrella chart to install on the spoke.
+	Chart *ChartInfo `json:"chart"`
+
+	// Values are the composition instance's spec values (e.g. installer bootstrap values), applied on
+	// the spoke once the CompositionDefinition is Ready. Reserved for the instance step.
+	// +optional
+	// +kubebuilder:pruning:PreserveUnknownFields
+	Values *runtime.RawExtension `json:"values,omitempty"`
+}
+
+// RemoteInstallStatus mirrors the managed CompositionDefinition and the target's reachability.
+type RemoteInstallStatus struct {
+	rtv1.ConditionedStatus `json:",inline"`
+
+	// Phase is a coarse rollup: Pending, Installing, Ready or Failed.
+	// +optional
+	Phase string `json:"phase,omitempty"`
+
+	// CompositionDefinition names the CompositionDefinition this RemoteInstall manages.
+	// +optional
+	CompositionDefinition string `json:"compositionDefinition,omitempty"`
+
+	// TargetConnection mirrors the KubernetesTarget's connectionStatus (Healthy/Down).
+	// +optional
+	TargetConnection string `json:"targetConnection,omitempty"`
+}
+
+//+kubebuilder:object:root=true
+//+kubebuilder:subresource:status
+//+kubebuilder:resource:scope=Namespaced,categories={krateo,core}
+//+kubebuilder:printcolumn:name="PHASE",type="string",JSONPath=".status.phase"
+//+kubebuilder:printcolumn:name="TARGET",type="string",JSONPath=".spec.targetRef.name"
+//+kubebuilder:printcolumn:name="CONNECTION",type="string",JSONPath=".status.targetConnection"
+//+kubebuilder:printcolumn:name="AGE",type="date",JSONPath=".metadata.creationTimestamp"
+
+// RemoteInstall installs a composition/umbrella chart onto a remote spoke as a single declarative
+// object: it owns a remote-targeted CompositionDefinition and reports rollup status.
+type RemoteInstall struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+
+	Spec   RemoteInstallSpec   `json:"spec"`
+	Status RemoteInstallStatus `json:"status,omitempty"`
+}
+
+//+kubebuilder:object:root=true
+
+// RemoteInstallList is a list of RemoteInstall.
+type RemoteInstallList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []RemoteInstall `json:"items"`
 }
