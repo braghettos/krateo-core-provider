@@ -207,3 +207,25 @@ status.conditions:
 
 **Fix:** publish the chart to a registry both clusters can reach. There is no in-cluster URL rewrite —
 mirroring a hub-local registry to the spoke is out of scope by design.
+
+## Accepted credential Secret shapes
+
+core-provider is a pure consumer of native Secrets — it never mints or rotates credentials (that is
+delegated to ESO). The `kubeconfigRef` Secret is read on every reconcile and may take either shape:
+
+1. **kubeconfig blob** — a full kubeconfig under `kubeconfigRef.key`. This also covers **cloud
+   identity** (GKE/EKS/AKS): a kubeconfig whose user carries an `exec` credential plugin
+   (`gke-gcloud-auth-plugin`, `aws eks get-token`, `kubelogin`, …) is resolved by client-go, provided
+   the plugin binary + cloud credentials are available to the core-provider pod.
+
+2. **token + server (+ ca.crt)** — the shape ESO emits when it mints and rotates a target
+   ServiceAccount token via the TokenRequest API. No kubeconfig assembly needed; keys:
+   - `token`  — the (short-lived, ESO-rotated) bearer token
+   - `server` — the target API server URL, e.g. `https://spoke.example.com:6443`
+   - `ca.crt` — the target cluster CA (optional; omit only for an already-trusted endpoint)
+
+Shape (2) lets an `ExternalSecret` sync a minted SA token straight into the reference — no
+TokenRequest renewal loop in core-provider. `kubeconfigRef.key` may stay `kubeconfig` (its absence is
+what triggers the token-form fallback). Rotation on either shape is picked up automatically (the
+Secret is re-read every reconcile and watched); `status.target.kubeconfigSecretResourceVersion`
+records which version the last successful probe used.

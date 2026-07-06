@@ -11,6 +11,7 @@ package clusterkube
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	compositiondefinitionsv1alpha1 "github.com/krateoplatformops/core-provider/apis/compositiondefinitions/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
@@ -63,14 +64,9 @@ func Remote(ctx context.Context, mgmt client.Client, target *compositiondefiniti
 		return nil, fmt.Errorf("reading kubeconfig secret %s/%s: %w", ref.Namespace, ref.Name, err)
 	}
 
-	kubeconfig := secret.Data[ref.Key]
-	if len(kubeconfig) == 0 {
-		return nil, fmt.Errorf("kubeconfig secret %s/%s key %q is empty", ref.Namespace, ref.Name, ref.Key)
-	}
-
-	rc, err := clientcmd.RESTConfigFromKubeConfig(kubeconfig)
+	rc, err := restConfigFromSecret(secret, ref.Key)
 	if err != nil {
-		return nil, fmt.Errorf("parsing kubeconfig from secret %s/%s: %w", ref.Namespace, ref.Name, err)
+		return nil, fmt.Errorf("building rest config from secret %s/%s: %w", ref.Namespace, ref.Name, err)
 	}
 
 	clients, err := clientsFor(rc)
@@ -79,6 +75,48 @@ func Remote(ctx context.Context, mgmt client.Client, target *compositiondefiniti
 	}
 	clients.SecretResourceVersion = secret.ResourceVersion
 	return clients, nil
+}
+
+// restConfigFromSecret builds a *rest.Config for a target from one of the two accepted Secret shapes,
+// so core-provider stays a pure Secret consumer (no TokenRequest/rotation loop of its own — those are
+// delegated to ESO):
+//
+//	(a) a full kubeconfig blob under the referenced key (static kubeconfig, or one carrying an
+//	    exec-plugin credential for cloud identity — GKE/EKS/AKS — which client-go resolves), or
+//	(b) token + server (+ optional ca.crt) keys — the shape ESO emits when it mints and rotates a
+//	    target ServiceAccount token via the TokenRequest API.
+//
+// Sane QPS/Burst are set so remote reconciles are not throttled by client-go defaults.
+func restConfigFromSecret(secret *corev1.Secret, key string) (*rest.Config, error) {
+	var rc *rest.Config
+
+	if kc := secret.Data[key]; len(kc) > 0 {
+		// Form (a): a full kubeconfig under the referenced key.
+		parsed, err := clientcmd.RESTConfigFromKubeConfig(kc)
+		if err != nil {
+			return nil, fmt.Errorf("parsing kubeconfig under key %q: %w", key, err)
+		}
+		rc = parsed
+	} else if token, server := secret.Data["token"], secret.Data["server"]; len(token) > 0 && len(server) > 0 {
+		// Form (b): token + server (+ ca.crt) — an ESO-minted/rotated SA token.
+		rc = &rest.Config{
+			Host:        strings.TrimSpace(string(server)),
+			BearerToken: strings.TrimSpace(string(token)),
+		}
+		if ca := secret.Data["ca.crt"]; len(ca) > 0 {
+			rc.TLSClientConfig = rest.TLSClientConfig{CAData: ca}
+		}
+	} else {
+		return nil, fmt.Errorf("secret carries neither a kubeconfig under key %q nor token+server keys", key)
+	}
+
+	if rc.QPS == 0 {
+		rc.QPS = 20
+	}
+	if rc.Burst == 0 {
+		rc.Burst = 30
+	}
+	return rc, nil
 }
 
 func clientsFor(rc *rest.Config) (*Clients, error) {
