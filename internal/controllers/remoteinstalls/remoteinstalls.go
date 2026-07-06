@@ -7,15 +7,20 @@ package remoteinstalls
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
 	compositiondefinitionsv1alpha1 "github.com/krateoplatformops/core-provider/apis/compositiondefinitions/v1alpha1"
+	"github.com/krateoplatformops/core-provider/internal/tools/clusterkube"
 	rtv1 "github.com/krateoplatformops/provider-runtime/apis/common/v1"
 	"github.com/krateoplatformops/provider-runtime/pkg/controller"
 	"github.com/krateoplatformops/provider-runtime/pkg/logging"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -93,6 +98,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 	ready := cd.Status.GetCondition(rtv1.TypeReady)
 	switch ready.Status {
 	case metav1.ConditionTrue:
+		// The CompositionDefinition is Ready: the generated CRD + cdc are on the spoke. Apply the
+		// composition instance there from spec.values to complete the install.
+		if err := r.applyInstance(ctx, ri, cd); err != nil {
+			return r.fail(ctx, ri, fmt.Sprintf("applying composition instance on target: %v", err))
+		}
 		ri.Status.Phase = phaseReady
 		ri.Status.SetConditions(rtv1.Available())
 	case metav1.ConditionFalse:
@@ -106,6 +116,70 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 		return reconcile.Result{}, err
 	}
 	return reconcile.Result{RequeueAfter: requeueInterval}, nil
+}
+
+// applyInstance creates or updates the composition instance on the spoke from spec.values. The
+// generated GVK comes from the CompositionDefinition status (apiVersion/kind/resource, recorded once
+// the CRD is generated); the instance is named/namespaced like the RemoteInstall. Cleanup is handled
+// by the CompositionDefinition's own Delete (the RemoteInstall owns the CD), which removes the
+// generated CRD and cascades its instances — so no finalizer is needed here.
+func (r *Reconciler) applyInstance(ctx context.Context, ri *compositiondefinitionsv1alpha1.RemoteInstall, cd *compositiondefinitionsv1alpha1.CompositionDefinition) error {
+	if cd.Status.ApiVersion == "" || cd.Status.Kind == "" || cd.Status.Resource == "" {
+		return fmt.Errorf("CompositionDefinition status has no generated GVK yet")
+	}
+	gv, err := schema.ParseGroupVersion(cd.Status.ApiVersion)
+	if err != nil {
+		return fmt.Errorf("parsing generated apiVersion %q: %w", cd.Status.ApiVersion, err)
+	}
+	gvr := gv.WithResource(cd.Status.Resource)
+
+	var spec map[string]interface{}
+	if ri.Spec.Values != nil && len(ri.Spec.Values.Raw) > 0 {
+		if err := json.Unmarshal(ri.Spec.Values.Raw, &spec); err != nil {
+			return fmt.Errorf("decoding spec.values: %w", err)
+		}
+	}
+
+	// Build clients for the spoke (same path the CompositionDefinition reconcile uses).
+	dt := &compositiondefinitionsv1alpha1.DeploymentTarget{
+		TargetRef: &compositiondefinitionsv1alpha1.TargetReference{Name: ri.Spec.TargetRef.Name},
+	}
+	clients, err := clusterkube.Remote(ctx, r.client, dt)
+	if err != nil {
+		return fmt.Errorf("building target clients: %w", err)
+	}
+	res := clients.Dynamic.Resource(gvr).Namespace(ri.Namespace)
+
+	live, err := res.Get(ctx, ri.Name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		inst := &unstructured.Unstructured{}
+		inst.SetAPIVersion(cd.Status.ApiVersion)
+		inst.SetKind(cd.Status.Kind)
+		inst.SetNamespace(ri.Namespace)
+		inst.SetName(ri.Name)
+		if spec != nil {
+			if err := unstructured.SetNestedMap(inst.Object, spec, "spec"); err != nil {
+				return fmt.Errorf("setting instance spec: %w", err)
+			}
+		}
+		if _, err := res.Create(ctx, inst, metav1.CreateOptions{}); err != nil {
+			return fmt.Errorf("creating composition instance: %w", err)
+		}
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("reading composition instance: %w", err)
+	}
+
+	// Update the desired spec, preserving anything the spoke controller set elsewhere.
+	if spec != nil {
+		if err := unstructured.SetNestedMap(live.Object, spec, "spec"); err != nil {
+			return fmt.Errorf("updating instance spec: %w", err)
+		}
+		if _, err := res.Update(ctx, live, metav1.UpdateOptions{}); err != nil {
+			return fmt.Errorf("updating composition instance: %w", err)
+		}
+	}
+	return nil
 }
 
 func (r *Reconciler) fail(ctx context.Context, ri *compositiondefinitionsv1alpha1.RemoteInstall, msg string) (reconcile.Result, error) {

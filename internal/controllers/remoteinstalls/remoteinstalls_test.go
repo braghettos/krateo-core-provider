@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	compositiondefinitionsv1alpha1 "github.com/krateoplatformops/core-provider/apis/compositiondefinitions/v1alpha1"
+	rtv1 "github.com/krateoplatformops/provider-runtime/apis/common/v1"
 	"github.com/krateoplatformops/provider-runtime/pkg/logging"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -76,5 +77,41 @@ func TestReconcile_CreatesOwnedRemoteCompositionDefinition(t *testing.T) {
 	}
 	if got.Status.CompositionDefinition != "team-a/krateo" {
 		t.Fatalf("compositionDefinition ref = %q", got.Status.CompositionDefinition)
+	}
+}
+
+// When the owned CompositionDefinition is Ready but has not yet recorded its generated GVK, the
+// instance cannot be applied — the RemoteInstall must go Failed (surfacing the problem) rather than
+// claim Ready.
+func TestReconcile_CDReadyWithoutGVKMarksFailed(t *testing.T) {
+	ri := &compositiondefinitionsv1alpha1.RemoteInstall{
+		ObjectMeta: metav1.ObjectMeta{Name: "krateo", Namespace: "team-a", UID: "ri-uid"},
+		Spec: compositiondefinitionsv1alpha1.RemoteInstallSpec{
+			TargetRef: compositiondefinitionsv1alpha1.TargetReference{Name: "spoke"},
+			Chart:     &compositiondefinitionsv1alpha1.ChartInfo{Url: "oci://ghcr.io/x/y", Version: "1.0.0"},
+		},
+	}
+	cd := &compositiondefinitionsv1alpha1.CompositionDefinition{
+		ObjectMeta: metav1.ObjectMeta{Name: "krateo", Namespace: "team-a"},
+	}
+	cd.Status.SetConditions(rtv1.Available()) // Ready=True but no ApiVersion/Kind/Resource
+
+	scheme := testScheme(t)
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(ri, cd).
+		WithStatusSubresource(&compositiondefinitionsv1alpha1.RemoteInstall{}, &compositiondefinitionsv1alpha1.CompositionDefinition{}).
+		Build()
+
+	r := &Reconciler{client: cl, scheme: scheme, log: logging.NewNopLogger()}
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: "krateo", Namespace: "team-a"}}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	got := &compositiondefinitionsv1alpha1.RemoteInstall{}
+	if err := cl.Get(context.Background(), types.NamespacedName{Name: "krateo", Namespace: "team-a"}, got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status.Phase != phaseFailed {
+		t.Fatalf("phase = %q, want %q", got.Status.Phase, phaseFailed)
 	}
 }
