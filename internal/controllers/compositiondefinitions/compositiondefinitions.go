@@ -625,25 +625,19 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 
 	gvr, err := e.pluralizer.GVKtoGVR(chartGVK)
 	if err != nil {
-		if deleted {
-			if apierrors.IsNotFound(err) {
-				log.Debug("Plural not found, CRD not found, external resource no longer exists", "gvk", chartGVK.String())
-			} else {
-				log.Debug("Unable to resolve GVR for deleted CompositionDefinition, treating external resource as gone", "gvk", chartGVK.String(), "err", err)
-			}
-			return reconciler.ExternalObservation{
-				ResourceExists:   false,
-				ResourceUpToDate: false,
-			}, nil
-		}
-
-		if apierrors.IsNotFound(err) {
-			gvr, err = crdutils.GetGVRFromGeneratedCRD(specSchemaBytes, chartGVK)
-			if err != nil {
-				return reconciler.ExternalObservation{}, fmt.Errorf("error getting GVR from generated CRD for GVR fallback: %w", err)
-			}
-		} else {
+		if !apierrors.IsNotFound(err) {
 			return reconciler.ExternalObservation{}, fmt.Errorf("error converting GVK to GVR: %w - GVK: %s", err, chartGVK.String())
+		}
+		// The pluralizer resolves against the MANAGEMENT cluster. A remote target's generated CRD
+		// lives on the spoke, so discovery misses it here — derive the GVR from the generated-CRD
+		// schema and let the CRD lookup below (against e.kube, which is the spoke for remote targets)
+		// decide whether the external resource actually exists. Previously a CD *being deleted* took
+		// a shortcut to ResourceExists=false whenever the hub pluralizer missed, which for a remote
+		// target skipped external.Delete entirely and orphaned the spoke's cdc, generated CRD and
+		// composition instances.
+		gvr, err = crdutils.GetGVRFromGeneratedCRD(specSchemaBytes, chartGVK)
+		if err != nil {
+			return reconciler.ExternalObservation{}, fmt.Errorf("error getting GVR from generated CRD for GVR fallback: %w", err)
 		}
 	} else if deleted {
 		log.Debug("CompositionDefinition was deleted, CRD still resolves; continuing observation", "gvr", gvr.String())
@@ -1170,6 +1164,20 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 	return nil
 }
 
+// statusGVR returns the generated GroupVersionResource recorded on the CompositionDefinition status
+// at deploy time (apiVersion + resource). For a remote target this is the source of truth, since the
+// generated CRD is not visible to the management-cluster pluralizer. ok is false until status records it.
+func statusGVR(cr *compositiondefinitionsv1alpha1.CompositionDefinition) (schema.GroupVersionResource, bool) {
+	if cr.Status.ApiVersion == "" || cr.Status.Resource == "" {
+		return schema.GroupVersionResource{}, false
+	}
+	gv, err := schema.ParseGroupVersion(cr.Status.ApiVersion)
+	if err != nil {
+		return schema.GroupVersionResource{}, false
+	}
+	return gv.WithResource(cr.Status.Resource), true
+}
+
 func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
 	cr, ok := mg.(*compositiondefinitionsv1alpha1.CompositionDefinition)
 	if !ok {
@@ -1194,8 +1202,18 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
 	crdExist := true
 	gvr, err = e.pluralizer.GVKtoGVR(gvk)
 	if apierrors.IsNotFound(err) {
-		crdExist = false
-		log.Debug("Plural not found, CRD not found, skipping deletion", "gvk", gvk.String())
+		// The pluralizer resolves against the MANAGEMENT cluster, but a remote target's generated CRD
+		// lives on the SPOKE — so discovery misses it and we would skip the whole Undeploy /
+		// composition-deletion block, orphaning the spoke's cdc, generated CRD and composition
+		// instances. Fall back to the GVR recorded on status at deploy time so a remote delete still
+		// tears the spoke down. Local deploys keep the discovery result (status may be empty).
+		if sgvr, ok := statusGVR(cr); ok {
+			gvr, crdExist, err = sgvr, true, nil
+			log.Debug("Plural not found on management cluster; using status GVR for remote teardown", "gvr", gvr.String())
+		} else {
+			crdExist = false
+			log.Debug("Plural not found, CRD not found, skipping deletion", "gvk", gvk.String())
+		}
 	}
 	if err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("error converting GVK to GVR: %w - GVK: %s", err, gvk.String())
