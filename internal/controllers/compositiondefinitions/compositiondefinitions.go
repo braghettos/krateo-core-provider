@@ -1227,8 +1227,15 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
 		if err != nil {
 			return fmt.Errorf("error getting CompositionDefinitions: %w", err)
 		}
-		if len(lst) == 1 {
-			log.Debug("Deleting Compositions of this version", "gvk", gvk.String())
+		// A remote target's generated CRD and cdc are DEDICATED to this CompositionDefinition (each
+		// remote CD gets its own projected CRD/cdc on the spoke), so its compositions must always be
+		// removed and its CRD always deleted. The len==1 / skipCRD gates below exist for a LOCAL
+		// shared CRD (multiple definitions on one version) and are additionally unreliable for a
+		// remote CD whose status GVK the management-cluster counting may not see during termination —
+		// which left the spoke's instance and generated CRD orphaned. Force the cleanup when remote.
+		remote := clusterkube.IsRemote(cr.Spec.Deploy)
+		if remote || len(lst) == 1 {
+			log.Debug("Deleting Compositions of this version", "gvk", gvk.String(), "remote", remote)
 
 			// Delete compositions of this version manually
 			ul, err := getters.GetCompositions(ctx, e.dynamic, gvr)
@@ -1249,24 +1256,27 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
 				return fmt.Errorf("error getting compositions: %w", err)
 			}
 			if len(ul.Items) > 0 {
+				// Retry until the cdc (still running — Undeploy runs only after this passes) finalizes
+				// the instances, so a composition is never orphaned by removing its cdc first.
 				return fmt.Errorf("error undeploying CompositionDefinition: waiting for composition deletion")
 			}
 		}
 
 		var skipCRD bool
-		lst, err = getters.GetCompositionDefinitions(ctx, e.mgmt, schema.GroupKind{
-			Group: gvk.Group,
-			Kind:  gvk.Kind,
-		})
-		if err != nil {
-			return fmt.Errorf("error getting CompositionDefinitions: %w", err)
+		if !remote {
+			lst, err = getters.GetCompositionDefinitions(ctx, e.mgmt, schema.GroupKind{
+				Group: gvk.Group,
+				Kind:  gvk.Kind,
+			})
+			if err != nil {
+				return fmt.Errorf("error getting CompositionDefinitions: %w", err)
+			}
+			skipCRD = len(lst) > 1
 		}
-		if len(lst) > 1 {
-			skipCRD = true
+		if skipCRD {
 			log.Debug("Skipping CRD deletion, other CompositionDefinitions exist", "gvk", gvk.String())
 		} else {
-			skipCRD = false
-			log.Debug("Deleting CRD", "gvk", gvk.String())
+			log.Debug("Deleting CRD", "gvk", gvk.String(), "remote", remote)
 		}
 
 		opts := deploy.UndeployOptions{
