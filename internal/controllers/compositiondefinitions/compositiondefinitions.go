@@ -141,6 +141,7 @@ func Setup(mgr ctrl.Manager, o Options) error {
 			client:     kubernetes.NewForConfigOrDie(mgr.GetConfig()),
 			dynamic:    dynamic.NewForConfigOrDie(mgr.GetConfig()),
 			kube:       cli,
+			apiReader:  mgr.GetAPIReader(),
 			log:        l,
 			recorder:   recorder,
 			pluralizer: o.Pluralizer,
@@ -293,6 +294,9 @@ type connector struct {
 	dynamic    dynamic.Interface
 	client     kubernetes.Interface
 	kube       client.Client
+	// apiReader reads directly from the API server (bypassing the controller-runtime cache) so
+	// Observe can re-read the CompositionDefinition fresh — see external.apiReader / D3.
+	apiReader  client.Reader
 	log        logging.Logger
 	recorder   record.EventRecorder
 	pluralizer pluralizerlib.PluralizerInterface
@@ -308,6 +312,7 @@ func (c *connector) Connect(ctx context.Context, mg resource.Managed) (reconcile
 
 	ext := &external{
 		mgmt:       c.kube,
+		apiReader:  c.apiReader,
 		kube:       c.kube,
 		dynamic:    c.dynamic,
 		client:     c.client,
@@ -340,6 +345,10 @@ type external struct {
 	// mgmt is the management-cluster client: it holds the CompositionDefinition
 	// resource, the chart/credentials secrets, and is where status is persisted.
 	mgmt client.Client
+	// apiReader reads the CompositionDefinition straight from the API server, bypassing the
+	// controller-runtime cache. Observe re-reads the CR through it so a lagging informer cache
+	// cannot make the engine reconcile a stale spec.chart.version (D3).
+	apiReader client.Reader
 	// kube, dynamic and client target the cluster where the generated CRD, RBAC and the
 	// composition-dynamic-controller are deployed (local == mgmt, or a remote target).
 	dynamic    dynamic.Interface
@@ -597,6 +606,22 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 	defer span.End()
 	log := e.log.WithValues("operation", "observe")
 	ctx = contexttools.CtxWithLogger(ctx, log)
+
+	// D3 (2026-07-08): the managed reconciler hands us the CompositionDefinition from the
+	// controller-runtime cache. If that cache lags a spec.chart.version bump (a missed/late watch),
+	// every input below — the chart fetch (chartfs.ForSpec reads cr.Spec.Chart), the derived GVK/GVR,
+	// the generated-CRD version — is computed from the STALE version, so the engine keeps regenerating
+	// the OLD CRD version and only self-heals at the next full re-list (SyncPeriod) or a manual engine
+	// restart. Re-read the CR straight from the API server so the version decision always uses the
+	// current spec. Best-effort: on error we keep the cached copy rather than fail the reconcile.
+	if e.apiReader != nil {
+		fresh := cr.DeepCopy()
+		if err := e.apiReader.Get(ctx, client.ObjectKeyFromObject(cr), fresh); err != nil {
+			log.Debug("fresh CR re-read failed; using cached copy", "error", err)
+		} else {
+			fresh.DeepCopyInto(cr)
+		}
+	}
 	deleted := meta.WasDeleted(cr)
 
 	log.Info("Observing CompositionDefinition")
