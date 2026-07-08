@@ -42,7 +42,15 @@ func main() {
 	envVarPrefix := fmt.Sprintf("%s_PROVIDER", strcase.UpperSnakeCase(providerName))
 
 	debug := flag.Bool("debug", env.Bool(fmt.Sprintf("%s_DEBUG", envVarPrefix), false), "Run with debug logging.")
-	syncPeriod := flag.Duration("sync", env.Duration(fmt.Sprintf("%s_SYNC", envVarPrefix), time.Hour*1), "Controller manager sync period such as 300ms, 1.5h, or 2h45m")
+	// SyncPeriod is the controller-runtime cache re-list interval. The CD reconcile reads the
+	// CompositionDefinition from this informer cache; if a watch event for a spec.chart.version bump
+	// is missed/late, the engine keeps reconciling the stale version (regenerating the OLD generated
+	// CRD version) and only self-heals at the next full re-list -- so a 1h default meant a live
+	// installer/component version upgrade could hang for up to an hour and in practice needed a manual
+	// engine restart to force a re-list (D3, "nudges must not exist", 2026-07-08). Default to 10m so a
+	// missed watch self-heals within minutes without any manual nudge; the CD population is small
+	// (dozens), so the extra re-list load is negligible. Still overridable via KRATEO_CORE_PROVIDER_SYNC.
+	syncPeriod := flag.Duration("sync", env.Duration(fmt.Sprintf("%s_SYNC", envVarPrefix), time.Minute*10), "Controller manager cache re-list period such as 300ms, 1.5h, or 2h45m")
 	pollInterval := flag.Duration("poll", env.Duration(fmt.Sprintf("%s_POLL_INTERVAL", envVarPrefix), time.Minute*3), "Poll interval controls how often an individual resource should be checked for drift.")
 	maxReconcileRate := flag.Int("max-reconcile-rate", env.Int(fmt.Sprintf("%s_MAX_RECONCILE_RATE", envVarPrefix), 5), "The global maximum rate per second at which resources may checked for drift from the desired state.")
 	leaderElection := flag.Bool("leader-election", env.Bool(fmt.Sprintf("%s_LEADER_ELECTION", envVarPrefix), false), "Use leader election for the controller manager.")
