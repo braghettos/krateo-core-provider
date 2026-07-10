@@ -104,8 +104,13 @@ Ordered by risk-reduction per unit effort. Tiers 0–2 are "make it correct and 
 
 ### Tier 1 — Structural (unblocks HA + create-pending)
 
-**1.1 Graceful shutdown / drain in `unstructured-runtime`.** *Repo: unstructured-runtime → CDC.*
-- On SIGTERM: stop accepting new items, **await in-flight workers** (bounded), *then* exit. Port the pattern from provider-runtime/controller-runtime (#233 item 8, "High").
+**1.1 Graceful shutdown / drain in `unstructured-runtime`. — ✅ IMPLEMENTED (pending review + tag).** *Repo: unstructured-runtime → CDC.*
+- **Verified gap:** `Run` (controller.go:508) returned immediately on ctx cancel; workers (`wait.Until`) never awaited; the *same* SIGTERM ctx ran every in-flight `Observe/Create/Update/Delete` → writes severed. `controller.go`/`priorityqueue.go` were **byte-identical to upstream/main** (clean to upstream); the queue's `done` channel existed but was **never closed** (parked-worker wakeup = ~2-line backport).
+- **Fix (decided: fork-first, in-flight-only, 30s default + paired chart):** workers run under a `context.Background()`-derived `reconcileCtx` (decoupled from SIGTERM), tracked in a `WaitGroup`; on shutdown: stop intake, `queue.ShutDown()` (now wakes parked workers via `close(done)`), bounded-wait in-flight reconciles up to `GracefulShutdownTimeout`, then cancel stragglers. New `Options.GracefulShutdownTimeout` (nil→30s, 0→abrupt, <0→forever) + `builder.WithGracefulShutdownTimeout`; **`Run` signature unchanged** (3 callers untouched). `SetGracefulShutdownTimeout` seam for the future HA lease-loss carve-out (#242).
+- **Tests:** queue wakeup + idempotency; `Run` finishes an in-flight reconcile under a **live ctx** after SIGTERM; idle controller exits promptly; grace timeout cancels a stuck reconcile. Full suite green, **race-clean**. Branch `braghettos/unstructured-runtime` `feat/graceful-drain` (based on v1.3.1).
+- **F8/#231:** the drain **strengthens** create-pending — the in-flight `Create` *and* its `SetExternalCreateSucceeded` annotation write now complete inside the grace window (delivers the 4.2 "drain-first" decision). #233 creation-grace-period is **not** bundled (lands in the `handleObserve` region PR #58 rewrites).
+- **Adversarial review (5-lens workflow, 19 agents, `-race`):** caught **1 real blocker I introduced** — a `spin()` send-vs-`done` teardown race: a worker waking on `done` instead of receiving left `spin()` wedged on a blocking send while holding both queue mutexes, deadlocking every later `Len()`/`Done()` and the drain (reproducible even without `-race`). **Fixed** by making `spin()`'s hand-off selectable on `done`, plus a stress test + a 4-worker requeue-storm regression (race-clean, 3×). Also fixed a `timeout==0` compat issue (now returns without awaiting workers = true abrupt) and hardened the event-recorder test double for concurrency. Nits (waiters non-decrement) documented as benign.
+- **Shipped:** `braghettos/unstructured-runtime` **tag `v1.3.2`** (superset of v1.3.1); CDC bumped (`feat/graceful-shutdown-flag`) with the `--graceful-shutdown-timeout` flag. **Remaining follow-up:** paired chart PR `terminationGracePeriodSeconds ≥ 40s`.
 - **Payoff:** eliminates the structural cause of stranded `external-create-pending` (#231); prerequisite for any CDC HA; reduces the F5-rollout stranding.
 
 **1.2 Adopt management-policy create/update gating.** Track/rebase `unstructured-runtime#58`; ensure the fork carries it (#233 item 2).
@@ -159,7 +164,7 @@ Keep `krateo.io/composition-version` (upstream's #102 rename to `composition-par
 | Area | Fork status | Plan tier |
 |---|---|---|
 | Nested defaulting (#235) | 🟢 **fixed** in crdgen (guarded parent `default:{}`), live-verified on kind; pending tag v1.7.16 + core-provider bump | 0 |
-| CDC graceful drain (#233/#231) | 🔴 gap (structural) | 1 |
+| CDC graceful drain (#233/#231) | 🟢 **shipped** v1.3.2 (bounded in-flight drain, decoupled reconcile ctx); reviewed (1 blocker found+fixed), race-clean; CDC bumped | 1 |
 | Mgmt-policy gating / grace period (#233) | 🟡 partial | 1 |
 | Chart HA (resources/probes/PDB/HPA) (#242) | 🟡 gaps | 2 |
 | `kubectl` version display (#234B) | 🟡 gap | 3 |
