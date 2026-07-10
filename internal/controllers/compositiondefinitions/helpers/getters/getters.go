@@ -265,7 +265,7 @@ func GetCompositionDefinitions(ctx context.Context, cli client.Client, gk schema
 	for i := range cdList.Items {
 		cd := &cdList.Items[i]
 
-		cdgvk := schema.FromAPIVersionAndKind(cd.Status.ApiVersion, cd.Status.Kind)
+		cdgvk := cd.Status.CurrentGVK()
 		if cdgvk.Group == gk.Group &&
 			cdgvk.Kind == gk.Kind {
 			lst = append(lst, *cd)
@@ -291,7 +291,7 @@ func GetCompositionDefinitionsWithVersion(ctx context.Context, cli client.Client
 	lst := []compositiondefinitionsv1alpha1.CompositionDefinition{}
 	for i := range cdList.Items {
 		cd := &cdList.Items[i]
-		cdgvk := schema.FromAPIVersionAndKind(cd.Status.ApiVersion, cd.Status.Kind)
+		cdgvk := cd.Status.CurrentGVK()
 		if cdgvk.Group == gvk.Group && cdgvk.Kind == gvk.Kind && cdgvk.Version == gvk.Version {
 			lst = append(lst, *cd)
 		}

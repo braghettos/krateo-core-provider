@@ -115,6 +115,39 @@ func RemoveStaleVersions(crd *apiextensionsv1.CustomResourceDefinition, prune ma
 	return removed
 }
 
+// compositionVersionColumn surfaces the served version an instance was written through — the
+// krateo.io/composition-version label stamped by the version MutatingAdmissionPolicy (F9) / the
+// owner-scoped migration (F5) — in `kubectl get <composition>` (#234B). The generated composition
+// CRDs otherwise only show AGE/READY, so the version-per-instance is invisible. It reads empty on
+// clusters where the stamping policy is not installed (the known policy-absence gap).
+var compositionVersionColumn = apiextensionsv1.CustomResourceColumnDefinition{
+	Name:     "VERSION",
+	Type:     "string",
+	JSONPath: `.metadata.labels.krateo\.io/composition-version`,
+}
+
+// AddCompositionVersionColumn adds the VERSION printer column to every served version of the CRD
+// that does not already carry it. The non-served "vacuum" storage version is skipped (kubectl never
+// lists it). Idempotent.
+func AddCompositionVersionColumn(crd *apiextensionsv1.CustomResourceDefinition) {
+	for i := range crd.Spec.Versions {
+		v := &crd.Spec.Versions[i]
+		if v.Name == "vacuum" {
+			continue
+		}
+		has := false
+		for _, c := range v.AdditionalPrinterColumns {
+			if c.Name == compositionVersionColumn.Name {
+				has = true
+				break
+			}
+		}
+		if !has {
+			v.AdditionalPrinterColumns = append(v.AdditionalPrinterColumns, compositionVersionColumn)
+		}
+	}
+}
+
 func UpdateStatus(crd *apiextensionsv1.CustomResourceDefinition, version apiextensionsv1.CustomResourceDefinitionVersion) error {
 	if version.Schema == nil || version.Schema.OpenAPIV3Schema == nil {
 		return fmt.Errorf("CRD %s version %s schema is nil", crd.Name, version.Name)
