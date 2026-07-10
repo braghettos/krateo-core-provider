@@ -23,7 +23,6 @@ import (
 	"github.com/krateoplatformops/plumbing/cache"
 
 	"github.com/go-logr/logr"
-	prettylog "github.com/krateoplatformops/plumbing/slogs/pretty"
 	"github.com/krateoplatformops/provider-runtime/pkg/controller"
 	"github.com/krateoplatformops/provider-runtime/pkg/logging"
 	"github.com/krateoplatformops/provider-runtime/pkg/ratelimiter"
@@ -212,14 +211,12 @@ func TestController(t *testing.T) {
 	}()
 
 	setupController := func(ctx context.Context, cfg *envconf.Config) (context.Context, error) {
-		lh := prettylog.New(&slog.HandlerOptions{
+		// stdlib slog text handler for test output (replaces plumbing/slogs/pretty, removed on the
+		// plumbing 1.10.x baseline).
+		lh := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 			Level:     slog.LevelDebug,
 			AddSource: false,
-		},
-			prettylog.WithDestinationWriter(os.Stderr),
-			prettylog.WithColor(),
-			prettylog.WithOutputEmptyAttrs(),
-		)
+		})
 
 		logrlog := logr.FromSlogHandler(slog.New(lh).Handler())
 		log := logging.NewLogrLogger(logrlog)
