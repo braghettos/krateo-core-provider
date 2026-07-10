@@ -229,6 +229,25 @@ spec:
                 x-kubernetes-list-map-keys:
                 - forPath
                 x-kubernetes-list-type: map
+              upgradePolicy:
+                default: Automatic
+                description: |-
+                  UpgradePolicy governs whether existing composition instances are migrated onto a newly
+                  served chart version:
+                    - Automatic (default): eagerly self-heal every owned instance onto the current version
+                      (retire the old version's controller once nothing references it). Backward-compatible
+                      with the pre-policy behavior.
+                    - Manual: keep existing instances on their current version (the new version is still served,
+                      so coexistence holds); migrate only when the krateo.io/upgrade-to-version annotation names
+                      the current served version.
+                    - Paused: never migrate; freeze existing instances on their version.
+                  Under Manual/Paused the old version's controller is kept so coexisting instances are not
+                  orphaned; served-version pruning still keeps any version an instance's label references.
+                enum:
+                - Automatic
+                - Manual
+                - Paused
+                type: string
             type: object
           status:
             description: CompositionDefinitionStatus is the status of a CompositionDefinition.

@@ -797,24 +797,31 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 	// The composition-version policy keys off the write endpoint, so a straggler can
 	// survive a prior transition; without this the migration would be one-shot and the
 	// straggler stays orphaned (the new label-scoped controller never selects it).
-	observeOwner := getters.DefinitionRef{Name: cr.Name, Namespace: cr.Namespace}
-	for _, vi := range cr.Status.Managed.VersionInfo {
-		if vi.Version == gvr.Version {
-			continue
-		}
-		// List THROUGH the current served endpoint, selecting by the old version LABEL
-		// (the label, not the served apiVersion, identifies the owning controller) and scoped
-		// to THIS definition — another definition's instances on this version are not ours.
-		stale, err := getters.GetOwnedCompositionsByVersionLabel(ctx, e.dynamic, gvr, vi.Version, observeOwner)
-		if err != nil {
-			return reconciler.ExternalObservation{}, fmt.Errorf("error checking compositions on version %s: %w", vi.Version, err)
-		}
-		if len(stale.Items) > 0 {
-			log.Debug("Compositions pending version migration", "fromVersion", vi.Version, "toVersion", gvr.Version, "count", len(stale.Items))
-			return reconciler.ExternalObservation{
-				ResourceExists:   true,
-				ResourceUpToDate: false,
-			}, nil
+	// Only demand migration when UpgradePolicy approves it (4.1). Under Manual (without the
+	// upgrade-to-version annotation) or Paused, existing instances legitimately coexist on their old
+	// version, so their still-present label must NOT drive not-up-to-date — otherwise Observe would
+	// forever re-drive an Update that deliberately declines to migrate (Observe<->Update ping-pong)
+	// and the CompositionDefinition would never reach Available. This mirrors the Update-side gate.
+	if cr.MigrationApproved(gvr.Version) {
+		observeOwner := getters.DefinitionRef{Name: cr.Name, Namespace: cr.Namespace}
+		for _, vi := range cr.Status.Managed.VersionInfo {
+			if vi.Version == gvr.Version {
+				continue
+			}
+			// List THROUGH the current served endpoint, selecting by the old version LABEL
+			// (the label, not the served apiVersion, identifies the owning controller) and scoped
+			// to THIS definition — another definition's instances on this version are not ours.
+			stale, err := getters.GetOwnedCompositionsByVersionLabel(ctx, e.dynamic, gvr, vi.Version, observeOwner)
+			if err != nil {
+				return reconciler.ExternalObservation{}, fmt.Errorf("error checking compositions on version %s: %w", vi.Version, err)
+			}
+			if len(stale.Items) > 0 {
+				log.Debug("Compositions pending version migration", "fromVersion", vi.Version, "toVersion", gvr.Version, "count", len(stale.Items))
+				return reconciler.ExternalObservation{
+					ResourceExists:   true,
+					ResourceUpToDate: false,
+				}, nil
+			}
 		}
 	}
 
@@ -1109,8 +1116,20 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 
 	oldGVK := cr.Status.CurrentGVK()
 	oldGVR := cr.Status.CurrentGVR()
+
+	// UpgradePolicy (4.1) gates instance migration AND the retirement of the old version's
+	// controller together: retiring the old controller without migrating its instances would orphan
+	// the coexisting old-version instances. When migration is not approved (Manual without the
+	// upgrade-to-version annotation, or Paused) both are skipped — the new version is still served
+	// (deployed above), so old and new coexist, and served-version pruning keeps any version whose
+	// label an instance still carries. Automatic (default) preserves the eager self-healing behavior.
+	migrate := cr.MigrationApproved(gvk.Version)
+	if !migrate {
+		log.Debug("Skipping instance migration and old-controller retirement per UpgradePolicy; old version coexists",
+			"upgradePolicy", cr.Spec.UpgradePolicy, "current", gvk.Version)
+	}
 	// Undeploy olders versions of the CRD
-	if oldGVK != gvk {
+	if migrate && oldGVK != gvk {
 		for _, vi := range cr.Status.Managed.VersionInfo {
 			if oldGVK.Kind == cr.Status.Managed.Kind && oldGVK.Version == vi.Version {
 				// Reference-counted retirement: one CRD/Kind can be shared by multiple
@@ -1157,19 +1176,21 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 	// advanced — are migrated on a later reconcile instead of being orphaned forever (the
 	// new label-scoped controller never selects an old-labelled CR). UpdateCompositionsVersion
 	// is a no-op when nothing carries the old label, so this is safe to run every transition.
-	log.Debug("Migrating Compositions to current version", "gvr", gvr.String())
-	owner := getters.DefinitionRef{Name: cr.Name, Namespace: cr.Namespace}
-	for _, vi := range cr.Status.Managed.VersionInfo {
-		if vi.Version == gvk.Version {
-			continue
-		}
-		// List + re-stamp THROUGH the current served endpoint (gvr, whose version is
-		// gvk.Version): the composition-version policy stamps the request's served version,
-		// so writing via the current endpoint makes it agree with the relabel instead of
-		// re-stamping the old version. Scoped to THIS definition so a shared CRD's other
-		// definitions (legitimately on an older version) are never touched.
-		if err := getters.UpdateCompositionsVersion(ctx, e.dynamic, gvr, vi.Version, gvk.Version, owner); err != nil {
-			return fmt.Errorf("error migrating compositions from version %s: %w", vi.Version, err)
+	if migrate {
+		log.Debug("Migrating Compositions to current version", "gvr", gvr.String())
+		owner := getters.DefinitionRef{Name: cr.Name, Namespace: cr.Namespace}
+		for _, vi := range cr.Status.Managed.VersionInfo {
+			if vi.Version == gvk.Version {
+				continue
+			}
+			// List + re-stamp THROUGH the current served endpoint (gvr, whose version is
+			// gvk.Version): the composition-version policy stamps the request's served version,
+			// so writing via the current endpoint makes it agree with the relabel instead of
+			// re-stamping the old version. Scoped to THIS definition so a shared CRD's other
+			// definitions (legitimately on an older version) are never touched.
+			if err := getters.UpdateCompositionsVersion(ctx, e.dynamic, gvr, vi.Version, gvk.Version, owner); err != nil {
+				return fmt.Errorf("error migrating compositions from version %s: %w", vi.Version, err)
+			}
 		}
 	}
 
@@ -1311,6 +1332,36 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
 			log.Debug("Skipping CRD deletion, other CompositionDefinitions exist", "gvk", gvk.String())
 		} else {
 			log.Debug("Deleting CRD", "gvk", gvk.String(), "remote", remote)
+		}
+
+		// Retire any coexisting OLD-version controllers first (Manual/Paused UpgradePolicy can leave
+		// more than one version's controller running). Their per-version-named Deployment/RBAC/Service
+		// would otherwise be orphaned once the CRD is removed below. Best-effort + SkipCRD (the CRD is
+		// torn down by the main Undeploy). All composition instances were already deleted above via the
+		// current served endpoint (None conversion serves every version's objects), so this only sheds
+		// the extra controllers.
+		for _, vi := range cr.Status.Managed.VersionInfo {
+			if vi.Version == gvr.Version {
+				continue
+			}
+			oldVerGVR := schema.GroupVersionResource{Group: gvr.Group, Version: vi.Version, Resource: gvr.Resource}
+			if uerr := deploy.Undeploy(ctx, e.kube, deploy.UndeployOptions{
+				DiscoveryClient:        memory.NewMemCacheClient(e.client.Discovery()),
+				Spec:                   (*compositiondefinitionsv1alpha1.ChartInfo)(vi.Chart),
+				KubeClient:             e.kube,
+				GVR:                    oldVerGVR,
+				Namespace:              cr.Namespace,
+				SkipCRD:                true,
+				DynamicClient:          e.dynamic,
+				RBACFolderPath:         CDCrbacConfigFolder,
+				DeploymentTemplatePath: CDCtemplateDeploymentPath,
+				ServiceTemplatePath:    ServiceTemplatePath,
+				ConfigmapTemplatePath:  CDCtemplateConfigmapPath,
+				JsonSchemaTemplatePath: JSONSchemaTemplateConfigmapPath,
+				AuthnNamespace:         AuthnNamespace,
+			}); uerr != nil && !errors.Is(uerr, deploy.ErrCompositionStillExist) {
+				log.Debug("Best-effort retire of coexisting old-version controller on delete failed", "version", vi.Version, "error", uerr.Error())
+			}
 		}
 
 		opts := deploy.UndeployOptions{

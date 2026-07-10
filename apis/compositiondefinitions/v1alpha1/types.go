@@ -134,6 +134,52 @@ type CompositionDefinitionSpec struct {
 	// +listType=map
 	// +listMapKey=forPath
 	StatusDataTemplate []StatusFieldMapping `json:"statusDataTemplate,omitempty"`
+
+	// UpgradePolicy governs whether existing composition instances are migrated onto a newly
+	// served chart version:
+	//   - Automatic (default): eagerly self-heal every owned instance onto the current version
+	//     (retire the old version's controller once nothing references it). Backward-compatible
+	//     with the pre-policy behavior.
+	//   - Manual: keep existing instances on their current version (the new version is still served,
+	//     so coexistence holds); migrate only when the krateo.io/upgrade-to-version annotation names
+	//     the current served version.
+	//   - Paused: never migrate; freeze existing instances on their version.
+	// Under Manual/Paused the old version's controller is kept so coexisting instances are not
+	// orphaned; served-version pruning still keeps any version an instance's label references.
+	// +optional
+	// +kubebuilder:validation:Enum=Automatic;Manual;Paused
+	// +kubebuilder:default=Automatic
+	UpgradePolicy UpgradePolicy `json:"upgradePolicy,omitempty"`
+}
+
+// UpgradePolicy selects the composition-instance migration strategy on a chart-version bump.
+type UpgradePolicy string
+
+const (
+	// UpgradePolicyAutomatic eagerly migrates every owned instance onto the current version.
+	UpgradePolicyAutomatic UpgradePolicy = "Automatic"
+	// UpgradePolicyManual migrates only when the upgrade-to-version annotation approves it.
+	UpgradePolicyManual UpgradePolicy = "Manual"
+	// UpgradePolicyPaused freezes migration entirely.
+	UpgradePolicyPaused UpgradePolicy = "Paused"
+
+	// AnnotationKeyUpgradeToVersion, on a CompositionDefinition with UpgradePolicy=Manual, approves
+	// migrating its instances onto the named served version (typically the current one).
+	AnnotationKeyUpgradeToVersion = "krateo.io/upgrade-to-version"
+)
+
+// MigrationApproved reports whether the controller should migrate existing instances onto
+// targetVersion given the definition's UpgradePolicy (and, for Manual, the upgrade-to-version
+// annotation). An empty policy is treated as Automatic for backward compatibility.
+func (cd *CompositionDefinition) MigrationApproved(targetVersion string) bool {
+	switch cd.Spec.UpgradePolicy {
+	case UpgradePolicyPaused:
+		return false
+	case UpgradePolicyManual:
+		return cd.GetAnnotations()[AnnotationKeyUpgradeToVersion] == targetVersion
+	default: // Automatic or unset
+		return true
+	}
 }
 
 // ApiReference references a RESTAction to resolve for status projection. It mirrors
