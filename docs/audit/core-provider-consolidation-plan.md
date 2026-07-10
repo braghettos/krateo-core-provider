@@ -117,15 +117,18 @@ Ordered by risk-reduction per unit effort. Tiers 0–2 are "make it correct and 
 
 **1.3 Creation grace period** in unstructured-runtime (#233 item 7) — complements F8/create-safety.
 
-### Tier 2 — Operability & HA (chart + posture)
+### Tier 2 — Operability & HA (chart + posture) — ✅ IMPLEMENTED (branch `feat/chart-ha-baseline`, `8a055bd`)
 
-**2.1 Chart HA baseline (`core-provider-chart`).**
-- Add sane `resources.requests` for all three components (unblocks CPU HPAs).
-- Ship **probes**, a **PodDisruptionBudget**, `topologySpreadConstraints`.
-- **Fix the chart-inspector HPA trap:** either ship an HPA template for chart-inspector or make `autoscaling.enabled` not strip `replicas` without an autoscaler.
-- core-provider HA-correct: `replicas ≥ 2` **with `leader-election: true`** (today default-off → double-reconcile if scaled). (#242)
+**2.1 Chart HA baseline (`core-provider-chart`). — done.** Decisions: chart baseline (defer binary /healthz), interim tcpSocket probes, inspector real-HPA, CDC delete dead autoscaling, opt-in-except-inspector.
+- `resources.requests/limits` for core-provider (100m/128Mi→500m/256Mi) + CDC (50m/64Mi→500m/256Mi); the CPU request unblocks the HPA denominator.
+- Interim **tcpSocket probes** (core-provider :8080 metrics — verified always-bound; chart-inspector :80). Proper `/healthz` endpoints = tracked follow-up (binaries lack a health server).
+- **Gated PDB** (enabled AND replicas>1) + **topologySpreadConstraints** for core-provider + chart-inspector (inspector gets a default *soft* node spread).
+- **core-provider leader-election**: gated `CORE_PROVIDER_LEADER_ELECTION` env + `coordination.k8s.io/leases` RBAC → `replicaCount≥2` is active-passive HA, not double-reconcile (#242).
+- **CDC HPA trap defused** (always emit replicas; `cdc.autoscaling.*` inert, kept in-schema for upgrade-safety). CDC `terminationGracePeriodSeconds:45` + `COMPOSITION_CONTROLLER_GRACEFUL_SHUTDOWN_TIMEOUT` env — the chart-side completion of the Topic C drain (image bump to ≥1.3.2 is a follow-up gated on a CDC release). core-provider also gets `terminationGracePeriodSeconds:45`.
+- `values.schema.json` additions for every new key (blocks are `additionalProperties:false`).
+- **Verified** with `helm lint` + `helm template` across default / HA-enabled / autoscaling-off / PDB-at-1-replica; **reviewed** (2 upgrade-safety fixes applied: keep `cdc.autoscaling` in-schema, declare `cdc` probes).
 
-**2.2 chart-inspector horizontal scaling.** It's stateless — give it the HPA it should have had (#242). Clean, low-risk win.
+**2.2 chart-inspector horizontal scaling. — done.** Real HPA keyed on its own `autoscaling.*`, default `replicaCount:2` + `autoscaling.enabled:true` + readiness probe + soft node spread. It's stateless, the only component with CPU requests, and its outage wedges installs on the ~30s `/rbac` timeout — the highest-value HA win. (Footprint note: 2×1-core requests; documented in values with a small-cluster opt-out.)
 
 ### Tier 3 — CRD-lifecycle polish
 
@@ -166,7 +169,7 @@ Keep `krateo.io/composition-version` (upstream's #102 rename to `composition-par
 | Nested defaulting (#235) | 🟢 **fixed** in crdgen (guarded parent `default:{}`), live-verified on kind; pending tag v1.7.16 + core-provider bump | 0 |
 | CDC graceful drain (#233/#231) | 🟢 **shipped** v1.3.2 (bounded in-flight drain, decoupled reconcile ctx); reviewed (1 blocker found+fixed), race-clean; CDC bumped | 1 |
 | Mgmt-policy gating / grace period (#233) | 🟡 partial | 1 |
-| Chart HA (resources/probes/PDB/HPA) (#242) | 🟡 gaps | 2 |
+| Chart HA (resources/probes/PDB/HPA) (#242) | 🟢 **implemented** (resources, tcpSocket probes, leader-election, PDB/topology, inspector HPA, CDC grace); helm-verified + reviewed | 2 |
 | `kubectl` version display (#234B) | 🟡 gap | 3 |
 | Version state consolidation (#234A) | 🟡 gap | 3 |
 | Version GC / pruning (#234) | 🟢 **done (ahead)** — live-verified safe on kind (S1–S5); caveat = unlabeled instances orphan (not delete), folds into policy-absence gap | — |
