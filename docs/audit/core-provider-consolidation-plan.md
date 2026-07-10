@@ -145,9 +145,8 @@ Ordered by risk-reduction per unit effort. Tiers 0–2 are "make it correct and 
 
 These were the fork-vs-upstream forks in the road. Each compounds the next; all three are now settled. Directions below are the agreed outcome, to execute alongside Tiers 0–3.
 
-**4.1 Migration philosophy: eager (F5) vs. coexistence (#234). → DECIDED: demote F5 to a strategy.**
-Add `upgradePolicy: Automatic | Manual | Paused` (#222). Keep the current eager owner-scoped self-heal as the **`Automatic` default** (backward-compatible — existing CompositionDefinitions behave unchanged). `Manual` gates migration on an explicit `upgrade-to-version` trigger; `Paused` freezes. This keeps F5's capability while converging toward upstream's compatibility-first coexistence model — eager becomes *opt-in-by-default* rather than *mandatory*.
-- Work: add `upgradePolicy` field to CompositionDefinition spec (default `Automatic`); branch `UpdateCompositionsVersion` on it; `Manual` reads an `upgrade-to-version` annotation; docs.
+**4.1 Migration philosophy: eager (F5) vs. coexistence (#234). → ✅ IMPLEMENTED** (branch `feat/upgrade-policy`, `9edc878`).
+`spec.upgradePolicy: Automatic (default) | Manual | Paused`. Automatic/unset = unchanged eager self-heal (backward-compatible); Manual = coexistence, migrate only when `krateo.io/upgrade-to-version` names the current version; Paused = frozen. **Correctness:** migration AND old-controller retirement are gated together on **both** the Update and Observe paths, so a non-migrating policy never orphans coexisting instances (old controller kept; pruning retains any labelled version). **Adversarial review caught a blocker** — the Observe-side straggler loop was ungated → Manual/Paused would ping-pong Observe↔Update and never reach Available; fixed with the same predicate. Delete now retires coexisting old controllers too. `MigrationApproved()` unit-tested; CRD enum+default regenerated. **Follow-up:** an e2e for the Manual/Paused coexistence steady state (cluster-driven, not unit-coverable).
 
 **4.2 create-pending: F8 recover vs. manual (#231). → DECIDED: keep F8, harden it, prioritize drain.**
 Keep the auto-recovery, but (a) confirm the negative (`Observe` reports absent) with certainty before the "clear pending + create" branch fires — guard against eventual-consistency false-negatives that would duplicate an external resource; (b) land **graceful drain (1.1)** so stranding rarely happens in the first place, shrinking F8's blast radius to genuine edge cases.
@@ -177,7 +176,7 @@ Keep `krateo.io/composition-version` (upstream's #102 rename to `composition-par
 | Version state consolidation (#234A) | 🟢 **done** — versionInfo projection + currentRef accessors, reviewed | 3 |
 | Version GC / pruning (#234) | 🟢 **done (ahead)** — live-verified safe on kind (S1–S5); caveat = unlabeled instances orphan (not delete), folds into policy-absence gap | — |
 | `None` conversion / no certs (#235) | 🟢 **done (ahead)** | — |
-| Migration philosophy (#234) | ⚖→✅ decided: `upgradePolicy`, F5=`Automatic` default | 4 |
+| Migration philosophy (#234) | 🟢 **implemented** — `upgradePolicy` (Automatic default), gated both paths, reviewed | 4 |
 | create-pending F8 (#231) | ⚖→✅ decided: keep+harden, drain-first | 4 |
 | Label name (#102/#104) | ⚖→✅ decided: hold name, consolidate constant | 4 |
 | Per-controller config / sharding (#230/#193) | ⚪ deferred | 5 |
