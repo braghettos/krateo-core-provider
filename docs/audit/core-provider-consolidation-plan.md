@@ -145,17 +145,14 @@ Ordered by risk-reduction per unit effort. Tiers 0–2 are "make it correct and 
 
 These were the fork-vs-upstream forks in the road. Each compounds the next; all three are now settled. Directions below are the agreed outcome, to execute alongside Tiers 0–3.
 
-**4.1 Migration philosophy: eager (F5) vs. coexistence (#234). → DECIDED: demote F5 to a strategy.**
-Add `upgradePolicy: Automatic | Manual | Paused` (#222). Keep the current eager owner-scoped self-heal as the **`Automatic` default** (backward-compatible — existing CompositionDefinitions behave unchanged). `Manual` gates migration on an explicit `upgrade-to-version` trigger; `Paused` freezes. This keeps F5's capability while converging toward upstream's compatibility-first coexistence model — eager becomes *opt-in-by-default* rather than *mandatory*.
-- Work: add `upgradePolicy` field to CompositionDefinition spec (default `Automatic`); branch `UpdateCompositionsVersion` on it; `Manual` reads an `upgrade-to-version` annotation; docs.
+**4.1 Migration philosophy: eager (F5) vs. coexistence (#234). → ✅ IMPLEMENTED** (branch `feat/upgrade-policy`, `9edc878`).
+`spec.upgradePolicy: Automatic (default) | Manual | Paused`. Automatic/unset = unchanged eager self-heal (backward-compatible); Manual = coexistence, migrate only when `krateo.io/upgrade-to-version` names the current version; Paused = frozen. **Correctness:** migration AND old-controller retirement are gated together on **both** the Update and Observe paths, so a non-migrating policy never orphans coexisting instances (old controller kept; pruning retains any labelled version). **Adversarial review caught a blocker** — the Observe-side straggler loop was ungated → Manual/Paused would ping-pong Observe↔Update and never reach Available; fixed with the same predicate. Delete now retires coexisting old controllers too. `MigrationApproved()` unit-tested; CRD enum+default regenerated. **Follow-up:** an e2e for the Manual/Paused coexistence steady state (cluster-driven, not unit-coverable).
 
-**4.2 create-pending: F8 recover vs. manual (#231). → DECIDED: keep F8, harden it, prioritize drain.**
-Keep the auto-recovery, but (a) confirm the negative (`Observe` reports absent) with certainty before the "clear pending + create" branch fires — guard against eventual-consistency false-negatives that would duplicate an external resource; (b) land **graceful drain (1.1)** so stranding rarely happens in the first place, shrinking F8's blast radius to genuine edge cases.
-- Work: harden F8's absent-branch (confirm-before-recreate) in unstructured-runtime; sequence after / together with 1.1.
+**4.2 create-pending: F8 recover vs. manual (#231). → ✅ IMPLEMENTED** (branch `braghettos/unstructured-runtime` `feat/create-pending-hardening`, `760d3b6`, on top of the drain).
+Confirm-the-negative: the incomplete-create recovery no longer clears pending + recreates on a single `ResourceExists:false`. While the create attempt is within a 2-minute grace period it keeps pending and requeues a **low-priority** re-observe (15s); only a resource still absent *beyond* the grace is a genuine miss to recreate. Guards against duplicating a create that landed but isn't yet visible in an eventually-consistent API. Adds `meta.ExternalCreatePendingDuring`. Complements the drain (1.1, shipped in v1.3.2) which shrinks the stranding window. **Reviewed (no blockers)**; tests cover within-grace-wait (+ requeue-lands), beyond-grace-recreate, observed-present-success. **Ships next as `v1.3.3`.**
 
-**4.3 `composition-version` label name (#102/#104). → DECIDED: hold the name, consolidate the constant.**
-Keep `krateo.io/composition-version` (upstream's #102 rename to `composition-parent-version` was reverted by #104 — no stable upstream target to track). Eliminate the still-open owner-label-duplication liability: move the cross-repo label constants (`CompositionDefinitionName/Namespace/…Label`, `CompositionVersionLabel`) into **one shared place** so core-provider and CDC stop declaring them independently (today they're byte-identical-by-contract across `meta.go` and `deploy.go`).
-- Work: pick the home for the shared constants (candidate: a small `krateo.io/…/labels` package or the existing shared module both already import); replace the duplicated declarations + the CROSS-REPO CONTRACT comment with imports.
+**4.3 `composition-version` label name (#102/#104). → DECIDED (hold the name); consolidation ⛔ BLOCKED on plumbing baseline.**
+Name held: keep `krateo.io/composition-version` (upstream #102 rename reverted by #104 — no stable target). **Consolidating the duplicated constant is blocked:** core-provider does **not** import unstructured-runtime at all, and the one shared dependency (plumbing) is at **different lines** — core-provider `1.7.x`, CDC `1.10.3` — so there is no single home a constant could live in that both consume, until the plumbing baseline is aligned. This ties 4.3 to the **"modernize plumbing baseline to `main`"** follow-up. The CROSS-REPO CONTRACT comment (byte-identical constants in `meta.go` and `deploy.go`) stays until then.
 
 ### Tier 5 — Larger / deferred
 
@@ -177,9 +174,9 @@ Keep `krateo.io/composition-version` (upstream's #102 rename to `composition-par
 | Version state consolidation (#234A) | 🟢 **done** — versionInfo projection + currentRef accessors, reviewed | 3 |
 | Version GC / pruning (#234) | 🟢 **done (ahead)** — live-verified safe on kind (S1–S5); caveat = unlabeled instances orphan (not delete), folds into policy-absence gap | — |
 | `None` conversion / no certs (#235) | 🟢 **done (ahead)** | — |
-| Migration philosophy (#234) | ⚖→✅ decided: `upgradePolicy`, F5=`Automatic` default | 4 |
-| create-pending F8 (#231) | ⚖→✅ decided: keep+harden, drain-first | 4 |
-| Label name (#102/#104) | ⚖→✅ decided: hold name, consolidate constant | 4 |
+| Migration philosophy (#234) | 🟢 **implemented** — `upgradePolicy` (Automatic default), gated both paths, reviewed | 4 |
+| create-pending F8 (#231) | 🟢 **implemented** — confirm-the-negative recovery, reviewed (ships v1.3.3) | 4 |
+| Label name (#102/#104) | ✅ name held; ⛔ constant consolidation blocked on plumbing baseline split | 4 |
 | Per-controller config / sharding (#230/#193) | ⚪ deferred | 5 |
 
 **Recommended first three:** 0.1 (defaulting bug) → 1.1 (CDC drain) → 2.1/3.1 (chart HA + printer column). **Tier 4 is now decided** (see directions above) and folds into execution: 4.3's constant-consolidation rides with any CDC/label touch; 4.1/4.2 sequence after 1.1 (drain) lands.
