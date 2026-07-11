@@ -594,8 +594,8 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 		return reconciler.ExternalObservation{}, fmt.Errorf(errNotCR)
 	}
 	// Engine reconcile span. core-provider is the top of the chain (no inbound traceparent);
-	// the loghandler bridges this span's trace_id/span_id onto every log of the reconcile.
-	// No-op tracer until OTEL_TRACING_ENABLED.
+	// the OTel log handler (provider-runtime logging.NewOTelHandler) bridges this span's
+	// trace_id/span_id onto every log of the reconcile. No-op tracer until OTEL_TRACING_ENABLED.
 	ctx, span := coretelemetry.Tracer().Start(ctx, "compositiondefinition.observe",
 		trace.WithSpanKind(trace.SpanKindServer),
 		trace.WithAttributes(

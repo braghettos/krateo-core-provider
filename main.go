@@ -14,7 +14,6 @@ import (
 	"github.com/krateoplatformops/core-provider/internal/controllers/compositiondefinitions"
 	"github.com/krateoplatformops/core-provider/internal/controllers/kubernetestargets"
 	"github.com/krateoplatformops/core-provider/internal/controllers/remoteinstalls"
-	"github.com/krateoplatformops/core-provider/internal/tools/loghandler"
 	"github.com/krateoplatformops/core-provider/internal/tools/pluralizer"
 	"github.com/krateoplatformops/plumbing/env"
 	"github.com/krateoplatformops/plumbing/ptr"
@@ -56,6 +55,7 @@ func main() {
 	leaderElection := flag.Bool("leader-election", env.Bool(fmt.Sprintf("%s_LEADER_ELECTION", envVarPrefix), false), "Use leader election for the controller manager.")
 	metricsEnabled := flag.Bool("otel-enabled", env.Bool("OTEL_ENABLED", false), "Enable OTLP metrics export for provider-runtime telemetry.")
 	tracingEnabled := flag.Bool("otel-tracing-enabled", env.Bool("OTEL_TRACING_ENABLED", false), "Enable OTLP trace export (distributed reconcile traces).")
+	logsEnabled := flag.Bool("otel-logs-enabled", env.Bool("OTEL_LOGS_ENABLED", false), "Enable OTLP log export (logs as a first-class OTel signal, in addition to the stderr JSON stream).")
 	metricsServiceName := flag.String("otel-service-name", fmt.Sprintf("%s-provider", strcase.KebabCase(providerName)), "The service name attached to exported OTLP metrics/traces.")
 	metricsExportInterval := flag.Duration("otel-export-interval", env.Duration("OTEL_EXPORT_INTERVAL", defaultOtelExportInterval), "The interval used to export OTLP metrics.")
 	maxErrorRetryInterval := flag.Duration("max-error-retry-interval", env.Duration(fmt.Sprintf("%s_MAX_ERROR_RETRY_INTERVAL", envVarPrefix), 1*time.Minute), "The maximum interval between retries when an error occurs. This should be less than the half of the poll interval.")
@@ -70,13 +70,43 @@ func main() {
 		logLevel = slog.LevelDebug
 	}
 
-	// Emit logs as one JSON object per line (RFC3339Nano UTC `timestamp` plus a
-	// `service` attribute) so they can be ingested by logs-ingester. See
-	// docs/log-ingester-compatibility.md.
-	log := logging.NewLogrLogger(logr.FromSlogHandler(loghandler.NewJSONHandler(logLevel, os.Stderr)))
+	// Identify ALL OTel signal pipelines (metrics, traces, logs) via the standard OTel env BEFORE any
+	// exporter/handler is built. provider-runtime builds its metrics resource from resource.Default()
+	// and IGNORES cfg.ServiceName, so service.name/version must arrive via OTEL_SERVICE_NAME /
+	// OTEL_RESOURCE_ATTRIBUTES; the log + trace resources reuse the same, keeping all three signals
+	// identical. core-provider is the engine/operator, so it carries no composition-id.
+	os.Setenv("OTEL_SERVICE_NAME", *metricsServiceName)
+	if sv := os.Getenv("SERVICE_VERSION"); sv != "" {
+		attrs := "service.version=" + sv
+		if existing := os.Getenv("OTEL_RESOURCE_ATTRIBUTES"); existing != "" {
+			attrs = existing + "," + attrs
+		}
+		os.Setenv("OTEL_RESOURCE_ATTRIBUTES", attrs)
+	}
 
-	// Set the logger for controller-runtime. This only has to log in INFO level as all debug logs are handled by our logger above.
-	ctrl.SetLogger(logr.FromSlogHandler(loghandler.NewJSONHandler(slog.LevelInfo, os.Stderr)))
+	// Install the OTLP LoggerProvider BEFORE building the log handler, so logging.NewOTelHandler's
+	// otelslog bridge captures it and log records export over OTLP (gated OTEL_LOGS_ENABLED). No app
+	// logger exists yet, so a bootstrap error goes to the stdlib logger.
+	logsShutdown, err := coretelemetry.SetupOTLPLogs(context.Background(), *logsEnabled, *metricsServiceName)
+	if err != nil {
+		log.Default().Printf("cannot initialize OpenTelemetry logs: %v", err)
+		os.Exit(1)
+	}
+
+	// Emit logs as one JSON object per line in the OTel log model (RFC3339Nano UTC `timestamp`,
+	// SeverityNumber, service.name, trace correlation) for logs-ingester, AND — when OTEL_LOGS_ENABLED
+	// — tee them to the OTLP pipeline. Shared handler from provider-runtime; see
+	// docs/log-ingester-compatibility.md.
+	log := logging.NewLogrLogger(logr.FromSlogHandler(logging.NewOTelHandler(logLevel, os.Stderr, *metricsServiceName)))
+
+	// controller-runtime logger at INFO (our logger above handles debug).
+	ctrl.SetLogger(logr.FromSlogHandler(logging.NewOTelHandler(slog.LevelInfo, os.Stderr, *metricsServiceName)))
+
+	defer func() {
+		if err := logsShutdown(context.Background()); err != nil {
+			log.Error(err, "Cannot shutdown OpenTelemetry logs")
+		}
+	}()
 
 	log.Debug("Starting",
 		"sync-period", syncPeriod.String(),
@@ -91,21 +121,6 @@ func main() {
 
 	telemetryEnabled := *metricsEnabled
 	telemetryExportInterval := *metricsExportInterval
-
-	// Identify BOTH the metrics (provider-runtime) and trace pipelines via the standard OTel env
-	// BEFORE telemetry.Setup runs: provider-runtime builds its metrics resource from
-	// resource.Default() and IGNORES cfg.ServiceName, so service.name/version must arrive via
-	// OTEL_SERVICE_NAME / OTEL_RESOURCE_ATTRIBUTES (both read by resource.Default at Setup time).
-	// This keeps the metrics and trace resources identical. core-provider is the engine/operator,
-	// so it carries no composition-id.
-	os.Setenv("OTEL_SERVICE_NAME", *metricsServiceName)
-	if sv := os.Getenv("SERVICE_VERSION"); sv != "" {
-		attrs := "service.version=" + sv
-		if existing := os.Getenv("OTEL_RESOURCE_ATTRIBUTES"); existing != "" {
-			attrs = existing + "," + attrs
-		}
-		os.Setenv("OTEL_RESOURCE_ATTRIBUTES", attrs)
-	}
 
 	telemetryMetrics, telemetryShutdown, err := telemetry.Setup(context.Background(), log, telemetry.Config{
 		Enabled:        telemetryEnabled,
