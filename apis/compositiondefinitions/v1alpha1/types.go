@@ -3,6 +3,7 @@ package v1alpha1
 import (
 	rtv1 "github.com/krateoplatformops/provider-runtime/apis/common/v1"
 	"github.com/krateoplatformops/provider-runtime/pkg/resource"
+	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -188,6 +189,14 @@ type ControllerConfig struct {
 	// +kubebuilder:validation:Pattern=`^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$`
 	// +kubebuilder:validation:XValidation:rule="duration(self) > duration('0s')",message="resyncInterval must be a positive Go duration such as 30m or 1h"
 	ResyncInterval *string `json:"resyncInterval,omitempty"`
+
+	// Resources sets the CDC container's compute resource requests/limits for this Kind. The shared
+	// template ships resources:{} (no requests), which is bad practice and makes the CDC
+	// unschedulable-aware and impossible to autoscale; set requests here for a Kind whose CDC needs
+	// a memory/CPU floor (e.g. one caching many instances). When unset, the chart-global default
+	// (cdc.resources) applies, so existing definitions render byte-identically.
+	// +optional
+	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
 }
 
 // UpgradePolicy selects the composition-instance migration strategy on a chart-version bump.

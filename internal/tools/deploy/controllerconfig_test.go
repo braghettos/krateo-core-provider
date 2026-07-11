@@ -65,3 +65,17 @@ func TestControllerConfig_PartialOnlyEmitsSet(t *testing.T) {
 	assert.Contains(t, args, "-workers=8")
 	assert.False(t, hasArgPrefix(args, "-resync-interval="), "resync unset must emit no arg: %v", args)
 }
+
+// spec.controller.resources (threaded by deploy.Deploy as a JSON string) must land as the CDC
+// container's resources; unset must render empty resources (byte-identical to the prior template).
+func TestControllerConfig_Resources(t *testing.T) {
+	rj := `{"requests":{"memory":"512Mi","cpu":"250m"},"limits":{"memory":"1Gi"}}`
+	res := renderCDCDeployment(t, "resources", rj).Spec.Template.Spec.Containers[0].Resources
+	assert.Equal(t, "512Mi", res.Requests.Memory().String())
+	assert.Equal(t, "250m", res.Requests.Cpu().String())
+	assert.Equal(t, "1Gi", res.Limits.Memory().String())
+
+	empty := renderCDCDeployment(t).Spec.Template.Spec.Containers[0].Resources
+	assert.Empty(t, empty.Requests, "unset resources must render empty")
+	assert.Empty(t, empty.Limits, "unset resources must render empty")
+}

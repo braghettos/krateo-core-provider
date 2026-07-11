@@ -53,8 +53,7 @@ spec:
             null
           readinessProbe:
             null
-          resources:
-            {}
+          resources: {{ if .resources }}{{ .resources }}{{ else }}{}{{ end }}
           volumeMounts:
           {{- if .api_ref_name }}
             - name: authn-serviceaccount-token

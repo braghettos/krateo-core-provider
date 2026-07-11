@@ -53,5 +53,4 @@ spec:
             null
           readinessProbe:
             null
-          resources:
-            {}
+          resources: {{ if .resources }}{{ .resources }}{{ else }}{}{{ end }}

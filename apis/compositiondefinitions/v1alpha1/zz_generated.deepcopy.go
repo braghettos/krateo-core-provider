@@ -21,7 +21,8 @@ limitations under the License.
 package v1alpha1
 
 import (
-	"k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
@@ -30,7 +31,7 @@ func (in *ApiReference) DeepCopyInto(out *ApiReference) {
 	*out = *in
 	if in.Extras != nil {
 		in, out := &in.Extras, &out.Extras
-		*out = new(v1.JSON)
+		*out = new(apiextensionsv1.JSON)
 		(*in).DeepCopyInto(*out)
 	}
 }
@@ -220,6 +221,11 @@ func (in *ControllerConfig) DeepCopyInto(out *ControllerConfig) {
 		in, out := &in.ResyncInterval, &out.ResyncInterval
 		*out = new(string)
 		**out = **in
+	}
+	if in.Resources != nil {
+		in, out := &in.Resources, &out.Resources
+		*out = new(v1.ResourceRequirements)
+		(*in).DeepCopyInto(*out)
 	}
 }
 

@@ -2,6 +2,7 @@ package deploy
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -499,6 +500,14 @@ func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 		}
 		if c.ResyncInterval != nil {
 			depValues = append(depValues, "resyncInterval", *c.ResyncInterval)
+		}
+		if c.Resources != nil {
+			// Marshal to JSON (valid YAML) and inline it into the template as `resources: {...}`.
+			rj, err := json.Marshal(c.Resources)
+			if err != nil {
+				return "", fmt.Errorf("marshaling spec.controller.resources: %w", err)
+			}
+			depValues = append(depValues, "resources", string(rj))
 		}
 	}
 	err = objects.CreateK8sObject(
