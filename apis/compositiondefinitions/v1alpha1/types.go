@@ -3,6 +3,7 @@ package v1alpha1
 import (
 	rtv1 "github.com/krateoplatformops/provider-runtime/apis/common/v1"
 	"github.com/krateoplatformops/provider-runtime/pkg/resource"
+	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -150,6 +151,52 @@ type CompositionDefinitionSpec struct {
 	// +kubebuilder:validation:Enum=Automatic;Manual;Paused
 	// +kubebuilder:default=Automatic
 	UpgradePolicy UpgradePolicy `json:"upgradePolicy,omitempty"`
+
+	// Controller tunes the composition-dynamic-controller (CDC) Deployment for THIS definition's
+	// Kind. It is the per-Kind escape hatch from the otherwise-uniform, cluster-wide CDC template:
+	// a Kind with many instances can raise reconcile concurrency and lengthen its resync without
+	// touching — or restarting — any other controller. Omitted fields fall back to the chart-global
+	// defaults, so existing definitions render byte-identically.
+	// +optional
+	Controller *ControllerConfig `json:"controller,omitempty"`
+}
+
+// ControllerConfig carries per-CompositionDefinition tuning for the composition-dynamic-controller.
+// Every field is optional and, when unset, inherits the chart-global default baked into the CDC
+// Deployment template. Note: replicas is deliberately NOT exposed here — running more than one CDC
+// replica for a Kind is unsafe until sharding or leader election exists (two replicas both reconcile
+// every instance and double-drive the same Helm release). Use Workers for in-process concurrency.
+type ControllerConfig struct {
+	// Workers is the number of concurrent reconcile workers inside the CDC process (the CDC's
+	// -workers flag; one shared work queue feeds them). It is the primary lever for reconcile
+	// throughput on a Kind with many instances. Defaults to the chart-global value (1) when unset.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=512
+	Workers *int32 `json:"workers,omitempty"`
+
+	// ResyncInterval is how often the CDC re-lists and re-observes every instance of the Kind to
+	// correct drift (the CDC's -resync-interval flag). On a Kind with many instances a short resync
+	// makes the controller re-enqueue the whole population continuously; lengthening it lets steady
+	// state ride watch events instead of full sweeps. Defaults to the chart-global value (3m) when
+	// unset. A Go duration string (e.g. "30m", "1h"); it is passed verbatim to the CDC's
+	// -resync-interval flag. Typed as string (not metav1.Duration) deliberately: core-provider runs
+	// no admission webhook, so the CRD schema is the only gate, and a plain string always decodes —
+	// a bad value can never fail the typed informer's atomic list-decode and stall every
+	// CompositionDefinition. The Pattern + CEL rules then reject unit-less/garbage values and
+	// non-positive durations ("0s"/negative would crash the CDC's ticker) at admission.
+	// +optional
+	// +kubebuilder:validation:Pattern=`^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$`
+	// +kubebuilder:validation:XValidation:rule="duration(self) > duration('0s')",message="resyncInterval must be a positive Go duration such as 30m or 1h"
+	ResyncInterval *string `json:"resyncInterval,omitempty"`
+
+	// Resources sets the CDC container's compute resource requests/limits for this Kind. The shared
+	// template ships resources:{} (no requests), which is bad practice and makes the CDC
+	// unschedulable-aware and impossible to autoscale; set requests here for a Kind whose CDC needs
+	// a memory/CPU floor (e.g. one caching many instances). When unset, the chart-global default
+	// (cdc.resources) applies, so existing definitions render byte-identically.
+	// +optional
+	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
 }
 
 // UpgradePolicy selects the composition-instance migration strategy on a chart-version bump.

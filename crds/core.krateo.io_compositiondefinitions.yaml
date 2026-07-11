@@ -157,6 +157,106 @@ spec:
                   rule: '!has(oldSelf.version) || has(self.version)'
                 - message: Repo is required once set
                   rule: '!has(oldSelf.repo) || has(self.repo)'
+              controller:
+                description: |-
+                  Controller tunes the composition-dynamic-controller (CDC) Deployment for THIS definition's
+                  Kind. It is the per-Kind escape hatch from the otherwise-uniform, cluster-wide CDC template:
+                  a Kind with many instances can raise reconcile concurrency and lengthen its resync without
+                  touching — or restarting — any other controller. Omitted fields fall back to the chart-global
+                  defaults, so existing definitions render byte-identically.
+                properties:
+                  resources:
+                    description: |-
+                      Resources sets the CDC container's compute resource requests/limits for this Kind. The shared
+                      template ships resources:{} (no requests), which is bad practice and makes the CDC
+                      unschedulable-aware and impossible to autoscale; set requests here for a Kind whose CDC needs
+                      a memory/CPU floor (e.g. one caching many instances). When unset, the chart-global default
+                      (cdc.resources) applies, so existing definitions render byte-identically.
+                    properties:
+                      claims:
+                        description: |-
+                          Claims lists the names of resources, defined in spec.resourceClaims,
+                          that are used by this container.
+
+                          This field depends on the
+                          DynamicResourceAllocation feature gate.
+
+                          This field is immutable. It can only be set for containers.
+                        items:
+                          description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                          properties:
+                            name:
+                              description: |-
+                                Name must match the name of one entry in pod.spec.resourceClaims of
+                                the Pod where this field is used. It makes that resource available
+                                inside a container.
+                              type: string
+                            request:
+                              description: |-
+                                Request is the name chosen for a request in the referenced claim.
+                                If empty, everything from the claim is made available, otherwise
+                                only the result of this request.
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        type: array
+                        x-kubernetes-list-map-keys:
+                        - name
+                        x-kubernetes-list-type: map
+                      limits:
+                        additionalProperties:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        description: |-
+                          Limits describes the maximum amount of compute resources allowed.
+                          More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                        type: object
+                      requests:
+                        additionalProperties:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        description: |-
+                          Requests describes the minimum amount of compute resources required.
+                          If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                          otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                          More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                        type: object
+                    type: object
+                  resyncInterval:
+                    description: |-
+                      ResyncInterval is how often the CDC re-lists and re-observes every instance of the Kind to
+                      correct drift (the CDC's -resync-interval flag). On a Kind with many instances a short resync
+                      makes the controller re-enqueue the whole population continuously; lengthening it lets steady
+                      state ride watch events instead of full sweeps. Defaults to the chart-global value (3m) when
+                      unset. A Go duration string (e.g. "30m", "1h"); it is passed verbatim to the CDC's
+                      -resync-interval flag. Typed as string (not metav1.Duration) deliberately: core-provider runs
+                      no admission webhook, so the CRD schema is the only gate, and a plain string always decodes —
+                      a bad value can never fail the typed informer's atomic list-decode and stall every
+                      CompositionDefinition. The Pattern + CEL rules then reject unit-less/garbage values and
+                      non-positive durations ("0s"/negative would crash the CDC's ticker) at admission.
+                    pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
+                    type: string
+                    x-kubernetes-validations:
+                    - message: resyncInterval must be a positive Go duration such
+                        as 30m or 1h
+                      rule: duration(self) > duration('0s')
+                  workers:
+                    description: |-
+                      Workers is the number of concurrent reconcile workers inside the CDC process (the CDC's
+                      -workers flag; one shared work queue feeds them). It is the primary lever for reconcile
+                      throughput on a Kind with many instances. Defaults to the chart-global value (1) when unset.
+                    format: int32
+                    maximum: 512
+                    minimum: 1
+                    type: integer
+                type: object
               deploy:
                 description: |-
                   Deploy: selects whether the composition-dynamic-controller (and the generated

@@ -39,6 +39,12 @@ spec:
             - -version={{ .apiVersion }}
             - -resource={{ .resource }}
             - -namespace={{ .namespace }}
+            {{- if .workers }}
+            - -workers={{ .workers }}
+            {{- end }}
+            {{- if .resyncInterval }}
+            - -resync-interval={{ .resyncInterval }}
+            {{- end }}
           ports:
             - name: http
               containerPort: 80
@@ -47,8 +53,7 @@ spec:
             null
           readinessProbe:
             null
-          resources:
-            {}
+          resources: {{ if .resources }}{{ .resources }}{{ else }}{}{{ end }}
           volumeMounts:
           {{- if .api_ref_name }}
             - name: authn-serviceaccount-token
