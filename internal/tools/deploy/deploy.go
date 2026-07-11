@@ -9,6 +9,7 @@ import (
 	"time"
 
 	contexttools "github.com/krateoplatformops/core-provider/internal/tools/context"
+	"github.com/krateoplatformops/plumbing/labels"
 	"github.com/krateoplatformops/provider-runtime/pkg/logging"
 
 	"github.com/krateoplatformops/core-provider/internal/tools/kube/watcher"
@@ -32,19 +33,14 @@ import (
 )
 
 const (
-	// CROSS-REPO CONTRACT: CompositionVersionLabel, CompositionDefinitionNameLabel and
-	// CompositionDefinitionNamespaceLabel are declared INDEPENDENTLY here and in
-	// composition-dynamic-controller's pkg/meta/meta.go (core-provider does not import the CDC).
-	// The three strings MUST stay byte-identical: if they drift, owner-scoped version migration
-	// silently selects nothing and leaves composition instances orphaned. Edit one → edit both.
-	CompositionVersionLabel = "krateo.io/composition-version"
-	// CompositionDefinitionNameLabel / CompositionDefinitionNamespaceLabel identify the
-	// CompositionDefinition that OWNS a composition instance. The composition-dynamic-controller
-	// stamps them at create time. They scope per-version migration to a single owning definition:
-	// one CRD/Kind can be shared by multiple CompositionDefinitions at different versions, so a
-	// version bump of one definition must not re-stamp another definition's instances.
-	CompositionDefinitionNameLabel      = "krateo.io/composition-definition-name"
-	CompositionDefinitionNamespaceLabel = "krateo.io/composition-definition-namespace"
+	// Composition label keys re-exported from plumbing/labels — the single shared source of truth with
+	// composition-dynamic-controller (compile-time identical, no cross-repo drift). CompositionVersionLabel
+	// is the served version an instance was written through; CompositionDefinitionName/NamespaceLabel
+	// identify the OWNING definition, scoping per-version migration so a version bump of one definition
+	// never re-stamps another definition's instances on a shared CRD/Kind.
+	CompositionVersionLabel             = labels.CompositionVersionLabel
+	CompositionDefinitionNameLabel      = labels.CompositionDefinitionNameLabel
+	CompositionDefinitionNamespaceLabel = labels.CompositionDefinitionNamespaceLabel
 	CompositionStillExistErr            = "compositions still exist"
 	controllerResourceSuffix            = "-controller"
 	configmapResourceSuffix             = "-configmap"
