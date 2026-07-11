@@ -155,6 +155,10 @@ func ApplyOrUpdateCRD(ctx context.Context,
 		Resource: newcrd.Spec.Names.Plural,
 	}
 
+	// Surface the per-instance served version (#234B) in kubectl. Done on newcrd before any path so
+	// the create path applies it and the append path (AppendVersion) carries it onto the new version.
+	generation.AddCompositionVersionColumn(newcrd)
+
 	crd, err := Get(ctx, cli, gvr.GroupResource())
 	if err != nil {
 		return gvr, fmt.Errorf("error getting CRD: %w", err)
@@ -190,6 +194,9 @@ func ApplyOrUpdateCRD(ctx context.Context,
 		if err != nil {
 			return gvr, fmt.Errorf("error updating CRD version: %w", err)
 		}
+		// Backfill the VERSION printer column onto any pre-existing served versions on the live CRD
+		// (versions created before this feature only got it on new appends otherwise). Idempotent.
+		generation.AddCompositionVersionColumn(crd)
 		err = kube.Apply(ctx, cli, crd, kube.ApplyOptions{})
 		if err != nil {
 			return gvr, fmt.Errorf("error applying CRD status update: %w", err)

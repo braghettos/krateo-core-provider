@@ -45,6 +45,24 @@ func UpdateVersionInfo(cr *compositiondefinitionsv1alpha1.CompositionDefinition,
 		cr.Status.Managed.VersionInfo[i].Served = v.Served
 		cr.Status.Managed.VersionInfo[i].Stored = v.Storage
 	}
+
+	// Make VersionInfo a true projection of the live CRD: drop entries whose version is no longer in
+	// the CRD (pruned by served-version GC). Without this VersionInfo is append-only and accumulates
+	// dead versions forever, drifting from reality (#234A) and driving redundant migrate/undeploy
+	// passes over versions that no longer exist. Safe: served-version pruning only removes a version
+	// once no instance carries its label and no other definition references it, so a version dropped
+	// here can have no stragglers left to migrate. The per-version Chart of surviving entries is kept.
+	live := make(map[string]struct{}, len(crd.Spec.Versions))
+	for _, v := range crd.Spec.Versions {
+		live[v.Name] = struct{}{}
+	}
+	kept := cr.Status.Managed.VersionInfo[:0]
+	for _, vi := range cr.Status.Managed.VersionInfo {
+		if _, ok := live[vi.Version]; ok {
+			kept = append(kept, vi)
+		}
+	}
+	cr.Status.Managed.VersionInfo = kept
 }
 
 func RefreshCompositionDefinitionStatus(

@@ -130,13 +130,16 @@ Ordered by risk-reduction per unit effort. Tiers 0–2 are "make it correct and 
 
 **2.2 chart-inspector horizontal scaling. — done.** Real HPA keyed on its own `autoscaling.*`, default `replicaCount:2` + `autoscaling.enabled:true` + readiness probe + soft node spread. It's stateless, the only component with CPU requests, and its outage wedges installs on the ~30s `/rbac` timeout — the highest-value HA win. (Footprint note: 2×1-core requests; documented in values with a small-cluster opt-out.)
 
-### Tier 3 — CRD-lifecycle polish
+### Tier 3 — CRD-lifecycle polish — ✅ IMPLEMENTED (branch `feat/tier3-crd-lifecycle`, `4ed964c`)
 
-**3.1 `kubectl get composition` version display (#234B, #222).** Add an `additionalPrinterColumns` entry (version from the label/status) to the **generated** composition CRDs. Smallest, lowest-risk fix; independent of preferred-version resolution.
+**3.1 `kubectl get composition` version display (#234B). — done.** `AddCompositionVersionColumn` adds a `VERSION` `additionalPrinterColumn` (from the `krateo.io/composition-version` label) to every served generated-CRD version (skips `vacuum`, idempotent); applied on create+append and backfilled on the status-only-update path. **Verified live on kind** (`kubectl get` shows `VERSION=v1-0-0`; the escaped-dot label jsonPath renders).
 
-**3.2 Preferred-/served-version ordering.** Decide the display policy (**latest applied** recommended) and make preferred resolution deterministic despite `v1-2-3` names. Fold into 3.3.
+**3.3 Version-state consolidation (#234A). — done (safe scope).**
+- **`versionInfo` is now a true projection of the live CRD**: `UpdateVersionInfo` drops entries whose version was pruned, instead of accumulating dead versions forever. The deploy-path status refresh is fed the **live post-prune CRD** (not the generated single-version one) so the projection stays stable. Safe: pruning only removes a version with no labelled instances → nothing left to migrate.
+- **One authoritative current-ref derivation**: `CompositionDefinitionStatus.CurrentGVK()/CurrentGVR()` replace the inline `FromAPIVersionAndKind` reconstruction at the migration + getter sites.
+- Scoped to avoid a risky breaking status-schema change to the verified F5/migration/pruning machinery (no new persisted `currentRef` field; the existing projection fields are centralized behind the accessors). **Adversarially reviewed** (3-lens, no blockers; the two gaps it found — Update-path projection collapse, printer backfill — fixed). **Prune e2e (Topic A) re-verified green** against the rewired code.
 
-**3.3 Consolidate the version state model (`currentRef`) (#234A).** Introduce one authoritative `status` runtime reference; make `status.apiVersion` / `versionInfo` / label **derived projections**; read served versions from the live CRD (already how pruning works). Shrinks the reconcile surface and removes drift-reconstruction.
+**3.2 Preferred-/served-version ordering.** Folded into 3.3 — served versions are read from the live CRD; display policy is the label-stamped served version (3.1's column).
 
 ### Tier 4 — ⚖ Strategic decisions — **DECIDED 2026-07 (Diego)**
 
@@ -170,8 +173,8 @@ Keep `krateo.io/composition-version` (upstream's #102 rename to `composition-par
 | CDC graceful drain (#233/#231) | 🟢 **shipped** v1.3.2 (bounded in-flight drain, decoupled reconcile ctx); reviewed (1 blocker found+fixed), race-clean; CDC bumped | 1 |
 | Mgmt-policy gating / grace period (#233) | 🟡 partial | 1 |
 | Chart HA (resources/probes/PDB/HPA) (#242) | 🟢 **implemented** (resources, tcpSocket probes, leader-election, PDB/topology, inspector HPA, CDC grace); helm-verified + reviewed | 2 |
-| `kubectl` version display (#234B) | 🟡 gap | 3 |
-| Version state consolidation (#234A) | 🟡 gap | 3 |
+| `kubectl` version display (#234B) | 🟢 **done** — VERSION printer column, live-verified | 3 |
+| Version state consolidation (#234A) | 🟢 **done** — versionInfo projection + currentRef accessors, reviewed | 3 |
 | Version GC / pruning (#234) | 🟢 **done (ahead)** — live-verified safe on kind (S1–S5); caveat = unlabeled instances orphan (not delete), folds into policy-absence gap | — |
 | `None` conversion / no certs (#235) | 🟢 **done (ahead)** | — |
 | Migration philosophy (#234) | ⚖→✅ decided: `upgradePolicy`, F5=`Automatic` default | 4 |

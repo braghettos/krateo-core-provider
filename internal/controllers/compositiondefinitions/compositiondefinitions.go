@@ -1107,8 +1107,8 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 		"namespace", cr.Namespace,
 	)
 
-	oldGVK := schema.FromAPIVersionAndKind(cr.Status.ApiVersion, cr.Status.Kind)
-	oldGVR := oldGVK.GroupVersion().WithResource(cr.Status.Resource)
+	oldGVK := cr.Status.CurrentGVK()
+	oldGVR := cr.Status.CurrentGVR()
 	// Undeploy olders versions of the CRD
 	if oldGVK != gvk {
 		for _, vi := range cr.Status.Managed.VersionInfo {
@@ -1182,7 +1182,16 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 		log.Info("served-version prune failed (Observe will re-drive)", "error", err.Error())
 	}
 
-	if err := status.RefreshCompositionDefinitionStatus(cr, crd, gvr, gvk, pkgFS.PackageURL()); err != nil {
+	// Refresh status against the LIVE CRD (post-deploy/prune), not the freshly generated single-version
+	// `crd`: the VersionInfo projection keeps only versions present in the CRD it is given, so feeding
+	// it the generated CRD would collapse VersionInfo to just the current version every reconcile. The
+	// live CRD carries the full served-version set, so the projection stays stable and per-version
+	// Chart is preserved. Fall back to the generated CRD if the live one can't be fetched.
+	liveCRD, getErr := crdclient.Get(ctx, e.kube, gvr.GroupResource())
+	if getErr != nil || liveCRD == nil {
+		liveCRD = crd
+	}
+	if err := status.RefreshCompositionDefinitionStatus(cr, liveCRD, gvr, gvk, pkgFS.PackageURL()); err != nil {
 		return fmt.Errorf("error refreshing CompositionDefinition status: %w", err)
 	}
 
