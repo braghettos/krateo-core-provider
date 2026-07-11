@@ -117,6 +117,10 @@ type DeployOptions struct {
 	SelfGroup       string
 	// DryRunServer is used to determine if the deployment should be applied in dry-run mode. This is ignored in lookup mode
 	DryRunServer bool
+	// Controller carries this CompositionDefinition's per-Kind CDC tuning (spec.controller). Nil, or
+	// nil fields within, are omitted from the Deployment template render so the template's
+	// chart-global defaults apply — existing definitions render byte-identically.
+	Controller *definitionsv1alpha1.ControllerConfig
 }
 
 func resourceNamer(resourceName string, chartVersion string) string {
@@ -483,13 +487,26 @@ func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 	log.Debug("Configmap successfully installed", "gvr", opts.GVR.String(), "name", cm.Name, "namespace", cm.Namespace, "digest", hsh.GetHash())
 
 	dep := appsv1.Deployment{}
+	// Per-Kind CDC tuning: pass spec.controller values only when set, so the Deployment template's
+	// chart-global defaults (workers=1, resync=3m) apply for definitions that omit them. Rendering
+	// here (Deploy) is what gets applied + hashed; the Lookup render is overwritten by a live Get,
+	// so it needs no change — a spec.controller edit re-renders, re-applies, and re-hashes here,
+	// which is exactly what triggers the CDC restart.
+	depValues := []any{"serviceAccountName", sa.Name, "api_ref_name", opts.ApiRefName}
+	if c := opts.Controller; c != nil {
+		if c.Workers != nil {
+			depValues = append(depValues, "workers", *c.Workers)
+		}
+		if c.ResyncInterval != nil {
+			depValues = append(depValues, "resyncInterval", *c.ResyncInterval)
+		}
+	}
 	err = objects.CreateK8sObject(
 		&dep,
 		opts.GVR,
 		getCDCDeploymentNN(namespacedName),
 		opts.DeploymentTemplatePath,
-		"serviceAccountName", sa.Name,
-		"api_ref_name", opts.ApiRefName)
+		depValues...)
 	if err != nil {
 		return "", err
 	}
