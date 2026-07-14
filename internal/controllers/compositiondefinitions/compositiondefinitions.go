@@ -179,14 +179,16 @@ func enqueueForReferencedSecret(cli client.Client) handler.MapFunc {
 			return nil
 		}
 
-		// Names of KubernetesTargets whose kubeconfig lives in this Secret.
-		targetNames := map[string]bool{}
-		var targets compositiondefinitionsv1alpha1.KubernetesTargetList
-		if err := cli.List(ctx, &targets); err == nil {
-			for i := range targets.Items {
-				ref := targets.Items[i].Spec.KubeconfigRef
+		// Namespaced keys (target-namespace/target-name) of KubernetesTargets whose kubeconfig
+		// lives in this Secret. A CompositionDefinition resolves its targetRef in its OWN
+		// namespace, so the match must be on (namespace, name), not name alone.
+		targets := map[targetKey]bool{}
+		var targetList compositiondefinitionsv1alpha1.KubernetesTargetList
+		if err := cli.List(ctx, &targetList); err == nil {
+			for i := range targetList.Items {
+				ref := targetList.Items[i].Spec.KubeconfigRef
 				if ref.Namespace == secret.Namespace && ref.Name == secret.Name {
-					targetNames[targets.Items[i].Name] = true
+					targets[targetKey{namespace: targetList.Items[i].Namespace, name: targetList.Items[i].Name}] = true
 				}
 			}
 		}
@@ -200,7 +202,7 @@ func enqueueForReferencedSecret(cli client.Client) handler.MapFunc {
 		for i := range list.Items {
 			cd := &list.Items[i]
 			if compositionReferencesChartSecret(cd, secret.Namespace, secret.Name) ||
-				compositionReferencesTargetIn(cd, targetNames) {
+				compositionReferencesTargetIn(cd, targets) {
 				reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(cd)})
 			}
 		}
@@ -225,7 +227,7 @@ func enqueueForKubernetesTarget(cli client.Client) handler.MapFunc {
 		var reqs []reconcile.Request
 		for i := range list.Items {
 			cd := &list.Items[i]
-			if compositionReferencesTargetIn(cd, map[string]bool{kt.Name: true}) {
+			if compositionReferencesTargetIn(cd, map[targetKey]bool{{namespace: kt.Namespace, name: kt.Name}: true}) {
 				reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(cd)})
 			}
 		}
@@ -243,14 +245,23 @@ func compositionReferencesChartSecret(cd *compositiondefinitionsv1alpha1.Composi
 	return c.Credentials.PasswordRef.Namespace == ns && c.Credentials.PasswordRef.Name == name
 }
 
+// targetKey identifies a KubernetesTarget by its namespace and name. targetRefs resolve
+// same-namespace, so a CompositionDefinition maps to a KubernetesTarget only when their
+// namespaces match.
+type targetKey struct {
+	namespace string
+	name      string
+}
+
 // compositionReferencesTargetIn reports whether cd's deploy.targetRef names one of the
-// given KubernetesTargets.
-func compositionReferencesTargetIn(cd *compositiondefinitionsv1alpha1.CompositionDefinition, targetNames map[string]bool) bool {
+// given KubernetesTargets. The match is on (namespace, name): cd's targetRef resolves in
+// cd's OWN namespace, so a same-named target in a different namespace is not a match.
+func compositionReferencesTargetIn(cd *compositiondefinitionsv1alpha1.CompositionDefinition, targets map[targetKey]bool) bool {
 	d := cd.Spec.Deploy
 	if d == nil || d.TargetRef == nil {
 		return false
 	}
-	return targetNames[d.TargetRef.Name]
+	return targets[targetKey{namespace: cd.Namespace, name: d.TargetRef.Name}]
 }
 
 // cleanupObsoleteFinalizerLabels removes the obsolete "composition.krateo.io/still-exist-compositions-finalizer" label
@@ -326,7 +337,9 @@ func (c *connector) Connect(ctx context.Context, mg resource.Managed) (reconcile
 	// CompositionDefinition resource and its referenced secrets stay in the management
 	// cluster, so mgmt keeps pointing at the local cluster.
 	if clusterkube.IsRemote(cr.Spec.Deploy) {
-		tc, err := clusterkube.Remote(ctx, c.kube, cr.Spec.Deploy)
+		// The KubernetesTarget is namespaced and resolved in the CompositionDefinition's
+		// own namespace.
+		tc, err := clusterkube.Remote(ctx, c.kube, cr.Namespace, cr.Spec.Deploy)
 		if err != nil {
 			return nil, err
 		}

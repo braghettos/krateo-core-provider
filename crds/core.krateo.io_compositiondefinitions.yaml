@@ -266,11 +266,12 @@ spec:
                 properties:
                   targetRef:
                     description: |-
-                      TargetRef references a cluster-scoped KubernetesTarget describing the remote
-                      cluster to deploy to. When omitted, deployment is local.
+                      TargetRef references a KubernetesTarget (resolved in this object's own namespace)
+                      describing the remote cluster to deploy to. When omitted, deployment is local.
                     properties:
                       name:
-                        description: Name of the cluster-scoped KubernetesTarget.
+                        description: Name of the KubernetesTarget, resolved in the
+                          referencing object's own namespace.
                         type: string
                     required:
                     - name

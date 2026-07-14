@@ -92,9 +92,11 @@ const (
 	DeploymentModeRemote DeploymentMode = "Remote"
 )
 
-// TargetReference references a cluster-scoped KubernetesTarget by name.
+// TargetReference references a namespaced KubernetesTarget by name. The target is always
+// resolved in the referencing object's OWN namespace (the CompositionDefinition's or
+// RemoteInstall's namespace), so no namespace field is carried here.
 type TargetReference struct {
-	// Name of the cluster-scoped KubernetesTarget.
+	// Name of the KubernetesTarget, resolved in the referencing object's own namespace.
 	Name string `json:"name"`
 }
 
@@ -102,8 +104,8 @@ type TargetReference struct {
 // and its RBAC are deployed. With no targetRef, deployment is local (the management
 // cluster).
 type DeploymentTarget struct {
-	// TargetRef references a cluster-scoped KubernetesTarget describing the remote
-	// cluster to deploy to. When omitted, deployment is local.
+	// TargetRef references a KubernetesTarget (resolved in this object's own namespace)
+	// describing the remote cluster to deploy to. When omitted, deployment is local.
 	// +optional
 	TargetRef *TargetReference `json:"targetRef,omitempty"`
 }
@@ -315,13 +317,15 @@ type KubernetesTargetStatus struct {
 
 //+kubebuilder:object:root=true
 //+kubebuilder:subresource:status
-//+kubebuilder:resource:scope=Cluster,categories={krateo,core}
+//+kubebuilder:resource:scope=Namespaced,categories={krateo,core}
 //+kubebuilder:printcolumn:name="CONNECTION",type="string",JSONPath=".status.connectionStatus"
 //+kubebuilder:printcolumn:name="VERSION",type="string",JSONPath=".status.version"
 //+kubebuilder:printcolumn:name="AGE",type="date",JSONPath=".metadata.creationTimestamp"
 
-// KubernetesTarget is a cluster-scoped reference to a remote cluster, used by a
-// CompositionDefinition's spec.deploy.targetRef to deploy compositions remotely.
+// KubernetesTarget is a namespaced reference to a remote cluster, used by a
+// CompositionDefinition's spec.deploy.targetRef (resolved in the CompositionDefinition's
+// own namespace) to deploy compositions remotely. It is namespaced so per-namespace
+// writes through snowplow /call (which force-namespaces every write) can create it.
 type KubernetesTarget struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
@@ -457,7 +461,8 @@ func (mg *CompositionDefinition) GetCondition(ct rtv1.ConditionType) rtv1.Condit
 // RemoteInstallSpec declares "install this chart on this spoke" as one object: the controller owns a
 // remote-targeted CompositionDefinition wiring the chart to the referenced KubernetesTarget.
 type RemoteInstallSpec struct {
-	// TargetRef selects the cluster-scoped KubernetesTarget (the spoke) to install onto.
+	// TargetRef selects the KubernetesTarget (the spoke) to install onto, resolved in the
+	// RemoteInstall's own namespace.
 	TargetRef TargetReference `json:"targetRef"`
 
 	// Chart is the composition/umbrella chart to install on the spoke.

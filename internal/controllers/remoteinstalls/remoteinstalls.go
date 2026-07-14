@@ -87,9 +87,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 	}
 
 	// Mirror the target's reachability (best-effort — a missing target still lets the CD reconcile
-	// and surface its own error).
+	// and surface its own error). The KubernetesTarget is namespaced and resolved in the
+	// RemoteInstall's own namespace.
 	kt := &compositiondefinitionsv1alpha1.KubernetesTarget{}
-	if err := r.client.Get(ctx, client.ObjectKey{Name: ri.Spec.TargetRef.Name}, kt); err == nil {
+	if err := r.client.Get(ctx, client.ObjectKey{Namespace: ri.Namespace, Name: ri.Spec.TargetRef.Name}, kt); err == nil {
 		ri.Status.TargetConnection = kt.Status.ConnectionStatus
 	}
 
@@ -140,11 +141,12 @@ func (r *Reconciler) applyInstance(ctx context.Context, ri *compositiondefinitio
 		}
 	}
 
-	// Build clients for the spoke (same path the CompositionDefinition reconcile uses).
+	// Build clients for the spoke (same path the CompositionDefinition reconcile uses). The
+	// KubernetesTarget is namespaced and resolved in the RemoteInstall's own namespace.
 	dt := &compositiondefinitionsv1alpha1.DeploymentTarget{
 		TargetRef: &compositiondefinitionsv1alpha1.TargetReference{Name: ri.Spec.TargetRef.Name},
 	}
-	clients, err := clusterkube.Remote(ctx, r.client, dt)
+	clients, err := clusterkube.Remote(ctx, r.client, ri.Namespace, dt)
 	if err != nil {
 		return fmt.Errorf("building target clients: %w", err)
 	}

@@ -119,11 +119,13 @@ spec:
                 - message: Repo is required once set
                   rule: '!has(oldSelf.repo) || has(self.repo)'
               targetRef:
-                description: TargetRef selects the cluster-scoped KubernetesTarget
-                  (the spoke) to install onto.
+                description: |-
+                  TargetRef selects the KubernetesTarget (the spoke) to install onto, resolved in the
+                  RemoteInstall's own namespace.
                 properties:
                   name:
-                    description: Name of the cluster-scoped KubernetesTarget.
+                    description: Name of the KubernetesTarget, resolved in the referencing
+                      object's own namespace.
                     type: string
                 required:
                 - name
