@@ -32,7 +32,7 @@ func testScheme(t *testing.T) *runtime.Scheme {
 // view surfaces the unreachable spoke, and re-probed on the shorter retry cadence.
 func TestReconcile_MissingKubeconfigMarksDown(t *testing.T) {
 	kt := &compositiondefinitionsv1alpha1.KubernetesTarget{
-		ObjectMeta: metav1.ObjectMeta{Name: "spoke"},
+		ObjectMeta: metav1.ObjectMeta{Name: "spoke", Namespace: "krateo-system"},
 		Spec: compositiondefinitionsv1alpha1.KubernetesTargetSpec{
 			KubeconfigRef: rtv1.SecretKeySelector{
 				Reference: rtv1.Reference{Name: "spoke-kubeconfig", Namespace: "krateo-system"},
@@ -48,7 +48,7 @@ func TestReconcile_MissingKubeconfigMarksDown(t *testing.T) {
 		Build()
 
 	r := &Reconciler{client: cl, log: logging.NewNopLogger(), poll: defaultPollInterval}
-	res, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: "spoke"}})
+	res, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Namespace: "krateo-system", Name: "spoke"}})
 	if err != nil {
 		t.Fatalf("Reconcile returned error (should record Down, not error): %v", err)
 	}
@@ -57,7 +57,7 @@ func TestReconcile_MissingKubeconfigMarksDown(t *testing.T) {
 	}
 
 	got := &compositiondefinitionsv1alpha1.KubernetesTarget{}
-	if err := cl.Get(context.Background(), types.NamespacedName{Name: "spoke"}, got); err != nil {
+	if err := cl.Get(context.Background(), types.NamespacedName{Namespace: "krateo-system", Name: "spoke"}, got); err != nil {
 		t.Fatal(err)
 	}
 	if got.Status.ConnectionStatus != connDown {

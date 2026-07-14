@@ -68,9 +68,11 @@ func TestE2E_RemoteTargeting(t *testing.T) {
 	}
 
 	// 1. Store the target kubeconfig as a native Secret in the management cluster, and a
-	//    cluster-scoped KubernetesTarget that references it.
+	//    namespaced KubernetesTarget (in the same namespace the deploy resolves it) that
+	//    references it.
+	const targetNS = "default"
 	secretName := "e2e-target-kubeconfig"
-	secret := corev1Secret(secretName, "default", targetKubeconfig)
+	secret := corev1Secret(secretName, targetNS, targetKubeconfig)
 	if err := mgmt.Create(ctx, secret); err != nil && !apierrors.IsAlreadyExists(err) {
 		t.Fatalf("creating kubeconfig secret: %v", err)
 	}
@@ -78,9 +80,9 @@ func TestE2E_RemoteTargeting(t *testing.T) {
 
 	ref := rtv1.SecretKeySelector{Key: "kubeconfig"}
 	ref.Name = secretName
-	ref.Namespace = "default"
+	ref.Namespace = targetNS
 	kt := &compositiondefinitionsv1alpha1.KubernetesTarget{
-		ObjectMeta: metav1.ObjectMeta{Name: "e2e-target"},
+		ObjectMeta: metav1.ObjectMeta{Name: "e2e-target", Namespace: targetNS},
 		Spec:       compositiondefinitionsv1alpha1.KubernetesTargetSpec{KubeconfigRef: ref},
 	}
 	if err := mgmt.Create(ctx, kt); err != nil && !apierrors.IsAlreadyExists(err) {
@@ -92,8 +94,9 @@ func TestE2E_RemoteTargeting(t *testing.T) {
 		TargetRef: &compositiondefinitionsv1alpha1.TargetReference{Name: "e2e-target"},
 	}
 
-	// 2. Resolve targetRef -> KubernetesTarget -> Secret -> clients (the real path).
-	clients, err := Remote(ctx, mgmt, deploy)
+	// 2. Resolve targetRef -> KubernetesTarget -> Secret -> clients (the real path). The
+	//    KubernetesTarget is namespaced and resolved in the referencing object's namespace.
+	clients, err := Remote(ctx, mgmt, targetNS, deploy)
 	if err != nil {
 		t.Fatalf("clusterkube.Remote: %v", err)
 	}

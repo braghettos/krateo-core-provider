@@ -71,10 +71,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 	}
 
 	// Probe: build remote clients from the target's kubeconfig Secret and query its discovery API.
+	// The KubernetesTarget is namespaced, so it resolves in its own namespace.
 	dt := &compositiondefinitionsv1alpha1.DeploymentTarget{
 		TargetRef: &compositiondefinitionsv1alpha1.TargetReference{Name: kt.Name},
 	}
-	clients, err := clusterkube.Remote(ctx, r.client, dt)
+	clients, err := clusterkube.Remote(ctx, r.client, kt.Namespace, dt)
 	if err != nil {
 		return r.markDown(ctx, kt, fmt.Sprintf("cannot build target clients: %v", err))
 	}

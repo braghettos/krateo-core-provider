@@ -15,7 +15,7 @@ spec:
     listKind: KubernetesTargetList
     plural: kubernetestargets
     singular: kubernetestarget
-  scope: Cluster
+  scope: Namespaced
   versions:
   - additionalPrinterColumns:
     - jsonPath: .status.connectionStatus
@@ -31,8 +31,10 @@ spec:
     schema:
       openAPIV3Schema:
         description: |-
-          KubernetesTarget is a cluster-scoped reference to a remote cluster, used by a
-          CompositionDefinition's spec.deploy.targetRef to deploy compositions remotely.
+          KubernetesTarget is a namespaced reference to a remote cluster, used by a
+          CompositionDefinition's spec.deploy.targetRef (resolved in the CompositionDefinition's
+          own namespace) to deploy compositions remotely. It is namespaced so per-namespace
+          writes through snowplow /call (which force-namespaces every write) can create it.
         properties:
           apiVersion:
             description: |-
