@@ -54,9 +54,9 @@ Two CRDs live in this group:
   (`types.go:204`) carries the conditioned status, last-applied `apiVersion`/`kind`/`resource`, a
   `managed.versionInfo` list of served CRD versions, the chart `packageUrl`, a `target` block
   (mode/connection/version), and a **`digest`** of the rendered CDC resources.
-- **`KubernetesTarget`** (cluster-scoped, `types.go:133`): `spec.kubeconfigRef` — a `SecretKeySelector`
-  pointing at a Secret key holding a target cluster's kubeconfig (`types.go:121-126`). It is the
-  credential-rotation seam.
+- **`KubernetesTarget`** (**namespaced**): `spec.kubeconfigRef` — a `SecretKeySelector`
+  pointing at a Secret key holding a target cluster's kubeconfig. It is resolved in the referencing
+  `CompositionDefinition`/`RemoteInstall`'s OWN namespace and is the credential-rotation seam.
 
 The provider's own two CRD manifests are checked into `crds/`.
 

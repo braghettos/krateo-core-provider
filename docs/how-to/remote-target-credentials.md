@@ -1,8 +1,9 @@
 # How-to: credentials for remote deployment targets (with External Secrets Operator)
 
 When a `CompositionDefinition` references a remote cluster via
-`spec.deploy.targetRef`, core-provider resolves the named **cluster-scoped
-`KubernetesTarget`**, then the kubeconfig Secret it points at. core-provider is a **pure
+`spec.deploy.targetRef`, core-provider resolves the named **namespaced
+`KubernetesTarget`** (in the `CompositionDefinition`'s OWN namespace), then the kubeconfig
+Secret it points at. core-provider is a **pure
 consumer of a native Kubernetes Secret**: it reads the kubeconfig on every reconcile and
 re-reconciles promptly when the Secret (or the KubernetesTarget) changes — watches are
 wired in the controller. It does **not** mint or rotate credentials itself — that is
