@@ -1,7 +1,10 @@
 package generation
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"sync"
 
 	_ "embed"
 
@@ -14,6 +17,34 @@ import (
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
+
+// crdgen.Generate shells out to the Go toolchain at runtime (`go mod tidy` + `go run controller-gen`
+// on generated sources). That is expensive, and Observe calls it on EVERY CompositionDefinition
+// reconcile purely to diff the desired CRD against the live one. On cold start the 5 managed
+// workers fire it concurrently, and the parallel `go` invocations thrash the shared build/module
+// cache into a multi-core livelock — the engine pegs every CPU it has and makes zero reconcile
+// progress, so component versions never advance and the CDCs never roll (observed wedging the
+// installer-release cluster after a restart; a warm cluster with few observes never hits the storm).
+//
+// Fix both dimensions here, at the single call site, without touching crdgen:
+//   - memoize by the (effective spec+status schema, gvk) digest so the toolchain runs once per
+//     distinct schema instead of once per Observe (the schema is stable across the vast majority
+//     of reconciles), and
+//   - serialize the actual invocation so concurrent cache-misses on cold start run the toolchain
+//     one at a time instead of stampeding it.
+var (
+	crdGenCache sync.Map   // digest string -> []byte (generated CRD manifest)
+	crdGenMu    sync.Mutex // serializes crdgen.Generate (the go-toolchain exec) across goroutines
+)
+
+func crdGenKey(specSchema, statusSchema []byte, gvk schema.GroupVersionKind) string {
+	h := sha256.New()
+	h.Write(specSchema)
+	h.Write([]byte{0})
+	h.Write(statusSchema)
+	fmt.Fprintf(h, "\x00%s", gvk.String())
+	return hex.EncodeToString(h.Sum(nil))
+}
 
 //go:embed statics/status.schema.json
 var statusJsonSchema []byte
@@ -255,15 +286,26 @@ func GetGVRFromGeneratedCRD(specSchema []byte, gvk schema.GroupVersionKind) (sch
 }
 
 func generateCRD(specSchema []byte, gvk schema.GroupVersionKind, onlyMetadata bool) ([]byte, error) {
-	var statusSchema []byte
-	var err error
-
 	// Read static status schema
-	statusSchema = statusJsonSchema
+	statusSchema := statusJsonSchema
 
 	if onlyMetadata {
 		specSchema = []byte(emptyJsonSchema)
 		statusSchema = []byte(emptyJsonSchema)
+	}
+
+	// Cache/serialize the go-toolchain invocation (see the crdGenCache comment above). Key on the
+	// EFFECTIVE schemas (post onlyMetadata substitution) so metadata-only calls collapse to one entry.
+	key := crdGenKey(specSchema, statusSchema, gvk)
+	if v, ok := crdGenCache.Load(key); ok {
+		return append([]byte(nil), v.([]byte)...), nil
+	}
+
+	crdGenMu.Lock()
+	defer crdGenMu.Unlock()
+	// Another goroutine may have generated this identical CRD while we waited for the lock.
+	if v, ok := crdGenCache.Load(key); ok {
+		return append([]byte(nil), v.([]byte)...), nil
 	}
 
 	res, err := crdgen.Generate(crdgen.Options{
@@ -278,5 +320,6 @@ func generateCRD(specSchema []byte, gvk schema.GroupVersionKind, onlyMetadata bo
 	if err != nil {
 		return nil, fmt.Errorf("generating crd: %w", err)
 	}
+	crdGenCache.Store(key, append([]byte(nil), res...))
 	return res, nil
 }
