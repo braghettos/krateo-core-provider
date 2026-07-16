@@ -48,10 +48,13 @@ func Generate(readSet []Resource, group, name string) Generated {
 
 	if len(clusterRows) > 0 {
 		out.ClusterRole = &rbacv1.ClusterRole{
+			// TypeMeta is required for the dynamic-client (unstructured) apply — see GenerateClusterScoped.
+			TypeMeta:   metav1.TypeMeta{Kind: "ClusterRole", APIVersion: rbacv1.SchemeGroupVersion.String()},
 			ObjectMeta: metav1.ObjectMeta{Name: name},
 			Rules:      buildRules(clusterRows),
 		}
 		out.ClusterRoleBinding = &rbacv1.ClusterRoleBinding{
+			TypeMeta:   metav1.TypeMeta{Kind: "ClusterRoleBinding", APIVersion: rbacv1.SchemeGroupVersion.String()},
 			ObjectMeta: metav1.ObjectMeta{Name: name},
 			Subjects:   []rbacv1.Subject{groupSubject},
 			RoleRef: rbacv1.RoleRef{
@@ -64,10 +67,12 @@ func Generate(readSet []Resource, group, name string) Generated {
 
 	for _, ns := range sortedKeys(byNamespace) {
 		out.Roles = append(out.Roles, rbacv1.Role{
+			TypeMeta:   metav1.TypeMeta{Kind: "Role", APIVersion: rbacv1.SchemeGroupVersion.String()},
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
 			Rules:      buildRules(byNamespace[ns]),
 		})
 		out.RoleBindings = append(out.RoleBindings, rbacv1.RoleBinding{
+			TypeMeta:   metav1.TypeMeta{Kind: "RoleBinding", APIVersion: rbacv1.SchemeGroupVersion.String()},
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
 			Subjects:   []rbacv1.Subject{groupSubject},
 			RoleRef: rbacv1.RoleRef{
@@ -88,10 +93,15 @@ func Generate(readSet []Resource, group, name string) Generated {
 // like the authn ServiceAccount mapping. Verbs are per-row (least privilege, never "*").
 func GenerateClusterScoped(readSet []Resource, group, name string) (*rbacv1.ClusterRole, *rbacv1.ClusterRoleBinding) {
 	cr := &rbacv1.ClusterRole{
+		// TypeMeta must be set: these objects are applied via the dynamic client
+		// (converted to unstructured), which requires an explicit GVK — a struct
+		// literal leaves TypeMeta empty and the apply fails "no kind".
+		TypeMeta:   metav1.TypeMeta{Kind: "ClusterRole", APIVersion: rbacv1.SchemeGroupVersion.String()},
 		ObjectMeta: metav1.ObjectMeta{Name: name},
 		Rules:      buildRules(readSet),
 	}
 	crb := &rbacv1.ClusterRoleBinding{
+		TypeMeta:   metav1.TypeMeta{Kind: "ClusterRoleBinding", APIVersion: rbacv1.SchemeGroupVersion.String()},
 		ObjectMeta: metav1.ObjectMeta{Name: name},
 		Subjects: []rbacv1.Subject{{
 			Kind:     rbacv1.GroupKind,
