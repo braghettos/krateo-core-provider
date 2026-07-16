@@ -116,6 +116,16 @@ func applyRestActionRBAC(ctx context.Context, kube client.Client, opts DeployOpt
 		return err // ErrIncomplete propagates
 	}
 
+	// Before executing the RESTAction's api steps, snowplow reads the RESTAction OBJECT itself under
+	// the per-composition group identity — but /rbac's read-set only covers the api steps' targets,
+	// not the RESTAction. Without a `get restactions` grant the resolve 403s ("cannot get
+	// restactions.templates.krateo.io"). Add it explicitly so the group can read what it resolves.
+	readSet = append(readSet, restactionrbac.Resource{
+		Group:    "templates.krateo.io",
+		Resource: "restactions",
+		Verb:     "get",
+	})
+
 	cr, crb := restactionrbac.GenerateClusterScoped(readSet, cdcGroup(saName), restActionRBACName(saName))
 
 	if err := kubecli.Apply(ctx, kube, cr, applyOpts); err != nil {

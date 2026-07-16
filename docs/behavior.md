@@ -8,8 +8,10 @@ integration contracts. Traced at `file:line` against the current tree.
 - **`CompositionDefinition`** (group `core.krateo.io`, plural `compositiondefinitions`, namespaced):
   the input — a reference to a Helm chart (`spec.chart`) and an optional remote deploy target
   (`spec.deploy.targetRef`). See `apis/.../types.go:244` and `crds/core.krateo.io_compositiondefinitions.yaml`.
-- **`KubernetesTarget`** (`core.krateo.io`, cluster-scoped): names a Secret key holding a target
-  cluster's kubeconfig (`types.go:133`, `crds/core.krateo.io_kubernetestargets.yaml`).
+- **`KubernetesTarget`** (`core.krateo.io`, **namespaced**): names a Secret key holding a target
+  cluster's kubeconfig (`crds/core.krateo.io_kubernetestargets.yaml`). It is resolved in the SAME
+  namespace as the referencing `CompositionDefinition`/`RemoteInstall` (no cross-namespace
+  targeting), which lets it be created through snowplow's force-namespaced `/call` write path.
 
 Per `CompositionDefinition`, core-provider **generates a third CRD** at runtime — the one derived
 from the referenced chart (group `composition.krateo.io`, version `v<chart-version-dashed>`, kind =
@@ -134,8 +136,9 @@ evaluation each reconcile:
 
 With no `spec.deploy.targetRef`, everything (generated CRD, RBAC, CDC) is deployed into the
 management cluster (`DeploymentModeLocal`). With a `targetRef`, `clusterkube.Remote`
-(`clusterkube.go:47`) reads the cluster-scoped `KubernetesTarget` → its kubeconfig Secret → builds
-target-cluster clients; the `CompositionDefinition` and secrets stay local. `status.target` reports
+reads the namespaced `KubernetesTarget` (resolved in the `CompositionDefinition`'s OWN namespace)
+→ its kubeconfig Secret → builds target-cluster clients; the `CompositionDefinition` and secrets
+stay local. `status.target` reports
 `mode`, `connectionStatus`, the target's k8s `version`, and the kubeconfig Secret's
 `resourceVersion` for rotation traceability (`types.go:182-201`, set at `compositiondefinitions.go:321`).
 

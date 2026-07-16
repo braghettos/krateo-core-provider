@@ -3,6 +3,7 @@ package generation
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	encjson "encoding/json"
 	"fmt"
 	"sync"
 
@@ -294,6 +295,16 @@ func generateCRD(specSchema []byte, gvk schema.GroupVersionKind, onlyMetadata bo
 		statusSchema = []byte(emptyJsonSchema)
 	}
 
+	// Normalize int-or-string unions before handing the schema to crdgen. A chart
+	// values.schema.json expresses a Kubernetes quantity as a JSON-Schema union —
+	// oneOf/anyOf of {type:number|integer} and {type:string} (e.g. the ACK ec2-chart's
+	// resources.requests/limits.cpu/memory). controller-gen (which crdgen shells out to)
+	// cannot emit a structural CRD for that union and fails the whole run with "not all
+	// generators ran successfully", so the CompositionDefinition never installs. Rewrite
+	// each such union to the x-kubernetes-int-or-string extension, which IS emittable.
+	// Any other schema is passed through untouched; the emptyJsonSchema no-ops here.
+	specSchema = normalizeIntOrStringUnions(specSchema)
+
 	// Cache/serialize the go-toolchain invocation (see the crdGenCache comment above). Key on the
 	// EFFECTIVE schemas (post onlyMetadata substitution) so metadata-only calls collapse to one entry.
 	key := crdGenKey(specSchema, statusSchema, gvk)
@@ -322,4 +333,87 @@ func generateCRD(specSchema []byte, gvk schema.GroupVersionKind, onlyMetadata bo
 	}
 	crdGenCache.Store(key, append([]byte(nil), res...))
 	return res, nil
+}
+
+// normalizeIntOrStringUnions rewrites JSON-Schema int-or-string unions
+// (a oneOf/anyOf whose members are exactly {type:number|integer} and {type:string})
+// to the Kubernetes `x-kubernetes-int-or-string: true` extension, which controller-gen
+// (via crdgen) can emit — a bare oneOf/anyOf union cannot be expressed in a structural
+// CRD and fails generation. Every other schema construct is preserved. On any JSON
+// parse/marshal error the original bytes are returned unchanged (fail-open: never make
+// a schema that previously generated worse).
+func normalizeIntOrStringUnions(specSchema []byte) []byte {
+	var root interface{}
+	if err := encjson.Unmarshal(specSchema, &root); err != nil {
+		return specSchema
+	}
+	normalizeSchemaNode(root)
+	out, err := encjson.Marshal(root)
+	if err != nil {
+		return specSchema
+	}
+	return out
+}
+
+// normalizeSchemaNode walks the decoded schema in place, collapsing int-or-string
+// unions at any depth and then recursing into every remaining child.
+func normalizeSchemaNode(node interface{}) {
+	switch n := node.(type) {
+	case map[string]interface{}:
+		// A Kubernetes quantity in a chart values.schema.json is a JSON-Schema union —
+		// oneOf/anyOf of {type:number|integer} and {type:string} (e.g. the ACK ec2-chart's
+		// resources.requests/limits.cpu/memory). crdgen cannot turn a bare union into a
+		// usable Go field: it emits {type:object, x-kubernetes-preserve-unknown-fields},
+		// so an instance's scalar "128Mi" is rejected ("expected map"). Collapse the union
+		// to `type: string` — a quantity is always written as a string ("128Mi","50m"),
+		// which controller-gen emits as a clean, instanceable string field.
+		for _, key := range []string{"oneOf", "anyOf"} {
+			if raw, ok := n[key]; ok && isIntOrStringUnion(raw) {
+				delete(n, key)
+				n["type"] = "string"
+			}
+		}
+		// controller-gen refuses to emit a float64 field for a bare `type: number` (errors
+		// "found float … re-run with crd:allowDangerousTypes=true" and fails the WHOLE
+		// generation — e.g. the ec2-chart's reconcile.defaultResyncPeriod/maxConcurentSyncs).
+		// Represent it as a string so the CRD generates + instances validate; `integer`/
+		// `string`/`boolean`/`object`/`array` are untouched. Numeric `default`s (invalid on
+		// a string field) are dropped. A bare number that is truly a float loses its numeric
+		// type at the API boundary — an accepted, documented trade against no install at all.
+		if t, ok := n["type"].(string); ok && t == "number" {
+			n["type"] = "string"
+			delete(n, "format")
+			delete(n, "default")
+		}
+		for _, v := range n {
+			normalizeSchemaNode(v)
+		}
+	case []interface{}:
+		for _, v := range n {
+			normalizeSchemaNode(v)
+		}
+	}
+}
+
+// isIntOrStringUnion reports whether a oneOf/anyOf value is EXACTLY the two-member set
+// {number|integer, string}, each member a bare {"type": "..."}. Anything richer (extra
+// keys, more members, nested constraints) is left untouched so real unions are preserved.
+func isIntOrStringUnion(raw interface{}) bool {
+	arr, ok := raw.([]interface{})
+	if !ok || len(arr) != 2 {
+		return false
+	}
+	types := map[string]bool{}
+	for _, e := range arr {
+		m, ok := e.(map[string]interface{})
+		if !ok || len(m) != 1 {
+			return false
+		}
+		t, ok := m["type"].(string)
+		if !ok {
+			return false
+		}
+		types[t] = true
+	}
+	return types["string"] && (types["number"] || types["integer"])
 }
