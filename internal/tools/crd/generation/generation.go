@@ -360,26 +360,30 @@ func normalizeIntOrStringUnions(specSchema []byte) []byte {
 func normalizeSchemaNode(node interface{}) {
 	switch n := node.(type) {
 	case map[string]interface{}:
+		// A Kubernetes quantity in a chart values.schema.json is a JSON-Schema union —
+		// oneOf/anyOf of {type:number|integer} and {type:string} (e.g. the ACK ec2-chart's
+		// resources.requests/limits.cpu/memory). crdgen cannot turn a bare union into a
+		// usable Go field: it emits {type:object, x-kubernetes-preserve-unknown-fields},
+		// so an instance's scalar "128Mi" is rejected ("expected map"). Collapse the union
+		// to `type: string` — a quantity is always written as a string ("128Mi","50m"),
+		// which controller-gen emits as a clean, instanceable string field.
 		for _, key := range []string{"oneOf", "anyOf"} {
 			if raw, ok := n[key]; ok && isIntOrStringUnion(raw) {
 				delete(n, key)
-				delete(n, "type") // the union carried the type; x-kubernetes-int-or-string replaces it
-				n["x-kubernetes-int-or-string"] = true
+				n["type"] = "string"
 			}
 		}
-		// controller-gen refuses to emit a float64 field for a bare `type: number`
-		// (it errors "found float … re-run with crd:allowDangerousTypes=true" and fails
-		// the WHOLE generation — e.g. the ACK ec2-chart's reconcile.defaultResyncPeriod /
-		// defaultMaxConcurentSyncs). Represent such a field as int-or-string so the CRD
-		// generates; `integer`/`string`/`boolean`/`object`/`array` are untouched. A bare
-		// number that is really a float loses float precision at the API boundary — an
-		// acceptable, documented trade against the chart not installing at all. Numeric
-		// `default`s (which controller-gen would also reject on an int-or-string) are dropped.
+		// controller-gen refuses to emit a float64 field for a bare `type: number` (errors
+		// "found float … re-run with crd:allowDangerousTypes=true" and fails the WHOLE
+		// generation — e.g. the ec2-chart's reconcile.defaultResyncPeriod/maxConcurentSyncs).
+		// Represent it as a string so the CRD generates + instances validate; `integer`/
+		// `string`/`boolean`/`object`/`array` are untouched. Numeric `default`s (invalid on
+		// a string field) are dropped. A bare number that is truly a float loses its numeric
+		// type at the API boundary — an accepted, documented trade against no install at all.
 		if t, ok := n["type"].(string); ok && t == "number" {
-			delete(n, "type")
+			n["type"] = "string"
 			delete(n, "format")
 			delete(n, "default")
-			n["x-kubernetes-int-or-string"] = true
 		}
 		for _, v := range n {
 			normalizeSchemaNode(v)

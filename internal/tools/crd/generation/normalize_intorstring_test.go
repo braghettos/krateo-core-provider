@@ -46,11 +46,9 @@ func TestNormalizeIntOrStringUnions(t *testing.T) {
 		if _, hasOneOf := node["oneOf"]; hasOneOf {
 			t.Errorf("%s: oneOf not stripped: %v", key, node)
 		}
-		if v, ok := node["x-kubernetes-int-or-string"].(bool); !ok || !v {
-			t.Errorf("%s: expected x-kubernetes-int-or-string:true, got %v", key, node)
-		}
-		if _, hasType := node["type"]; hasType {
-			t.Errorf("%s: leftover type after normalization: %v", key, node)
+		// Collapsed to a plain string field (a Kubernetes quantity is written "128Mi"/"50m").
+		if node["type"] != "string" {
+			t.Errorf("%s: expected type:string, got %v", key, node)
 		}
 	}
 
