@@ -426,8 +426,13 @@ func TestController(t *testing.T) {
 				},
 				3*time.Minute,
 				func(cd *v1alpha1.CompositionDefinition) bool {
+					// VersionInfo is a projection of the live CRD (#234A): the served-version prune
+					// drops the stale old version from BOTH the CRD and VersionInfo, so after the
+					// 2.0.3 -> 2.0.4 upgrade it settles at 2 ([<new> (served), vacuum (storage)]),
+					// not the old append-only 3. Waiting on the settled 2 also skips the transient
+					// pre-prune 3, which never coincides with Ready=Available.
 					return cd.GetCondition(rtv1.TypeReady).Reason == rtv1.ReasonAvailable &&
-						len(cd.Status.Managed.VersionInfo) == 3 &&
+						len(cd.Status.Managed.VersionInfo) == 2 &&
 						slices.ContainsFunc(cd.Status.Managed.VersionInfo, func(v v1alpha1.VersionDetail) bool {
 							return v.Version == newVersionNormalized
 						})
@@ -468,9 +473,9 @@ func TestController(t *testing.T) {
 			// [vacuum (storage), <new> (served)] — the old version is dropped. The prune is driven
 			// from Observe and applied over several reconciles, so poll the CRD until it converges.
 			//
-			// NOTE: Status.Managed.VersionInfo (the watcher condition above) is append-only history
-			// — it is NOT trimmed on prune, so it intentionally still lists the pruned version,
-			// which is why the watcher waits for 3 while the live CRD settles at 2.
+			// NOTE: Status.Managed.VersionInfo is a projection of the live CRD (#234A) — the pruned
+			// version is dropped from it too, so it settles at 2 in lockstep with the CRD (this is
+			// what the watcher condition above waits for).
 			deadline := time.Now().Add(2 * time.Minute)
 			for {
 				if err = r.Get(ctx, crdName, "", &crd); err != nil {
