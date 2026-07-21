@@ -36,6 +36,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	crcontroller "sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -48,6 +49,11 @@ const (
 	// by the RemoteInstall migration shim.
 	managedByLabel = "compositionmirror.krateo.io/managed-by"
 	managedByValue = "core-provider"
+
+	// cdFinalizer holds a remote CompositionDefinition in Terminating until the reflector has deleted
+	// its hub Composition instances, so instances never outlive their type (mirroring how a local CD
+	// delete cascades instances via CRD removal). Hub-only cleanup, so it never blocks on the spoke.
+	cdFinalizer = "compositionmirror.krateo.io/hub-teardown"
 
 	// requeueInterval is the steady-state resync: because there is no dynamic watch on the generated
 	// hub Kind (v1), drift on a hub Composition is healed at most this long after it happens.
@@ -109,10 +115,30 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 		return reconcile.Result{}, client.IgnoreNotFound(err)
 	}
 
+	// Teardown first: on delete, remove the hub Composition instances this CD's type owns, then release
+	// our finalizer. Handled before the remote check so the finalizer can never get stuck (even if the
+	// CD stopped being remote). It is hub-only, so it never blocks on an unreachable spoke.
+	if cd.DeletionTimestamp != nil {
+		return r.reconcileDelete(ctx, cd)
+	}
+
 	// Only remote CompositionDefinitions have a hub-desired / spoke-realized split. A local CD's
-	// Composition instances are rendered in place by the local cdc — there is nothing to mirror.
+	// Composition instances are rendered in place by the local cdc — there is nothing to mirror. Drop
+	// a stale finalizer if this CD is (no longer) remote.
 	if !clusterkube.IsRemote(cd.Spec.Deploy) {
+		if controllerutil.RemoveFinalizer(cd, cdFinalizer) {
+			if err := r.hub.Update(ctx, cd); err != nil {
+				return reconcile.Result{}, err
+			}
+		}
 		return reconcile.Result{}, nil
+	}
+
+	// Hold the CD until the reflector has torn its hub Compositions down on delete (reconcileDelete).
+	if controllerutil.AddFinalizer(cd, cdFinalizer) {
+		if err := r.hub.Update(ctx, cd); err != nil {
+			return reconcile.Result{}, err
+		}
 	}
 
 	// The generated GVK is recorded on the CD status once its CRD exists (on both hub and spoke, see
@@ -159,6 +185,76 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 	}
 
 	return reconcile.Result{RequeueAfter: requeueInterval}, nil
+}
+
+// reconcileDelete removes the hub Composition instances of a deleted CompositionDefinition's generated
+// Kind, then releases the reflector's finalizer. It is hub-only and therefore always completable — it
+// never waits on the spoke, so the CD can never wedge in Terminating on an unreachable target. The
+// spoke mirrors are cleaned by the CompositionDefinition's own spoke teardown (CRD removal cascades
+// them). Deletes are issued but not awaited: a hub Composition held by a user's own finalizer will
+// finish deleting on its own, and the CD must not block on it.
+func (r *Reconciler) reconcileDelete(ctx context.Context, cd *compositiondefinitionsv1alpha1.CompositionDefinition) (reconcile.Result, error) {
+	if !controllerutil.ContainsFinalizer(cd, cdFinalizer) {
+		return reconcile.Result{}, nil
+	}
+	if cd.Status.ApiVersion != "" && cd.Status.Kind != "" && cd.Status.Resource != "" {
+		gv, err := schema.ParseGroupVersion(cd.Status.ApiVersion)
+		if err != nil {
+			return reconcile.Result{}, fmt.Errorf("compositionmirror: parsing generated apiVersion %q: %w", cd.Status.ApiVersion, err)
+		}
+		gvr := gv.WithResource(cd.Status.Resource)
+
+		// Clear the hub Compositions (hub-only, always reachable) so instances never outlive their type.
+		if err := deleteAllHubCompositions(ctx, r.hubDynamic, gvr, cd.Namespace); err != nil {
+			return reconcile.Result{}, fmt.Errorf("compositionmirror: cleaning hub compositions for %s/%s: %w", cd.Namespace, cd.Name, err)
+		}
+
+		// For a remote CD also clear the managed spoke mirrors. This is required, not just tidy: the
+		// spoke cdc finalizes each mirror's Helm release on delete, and the CompositionDefinition's own
+		// teardown waits for the spoke composition instances to be gone before it removes the cdc/CRD —
+		// so leaving the mirrors would deadlock that teardown. Bounded + spoke-dependent: an unreachable
+		// spoke keeps the CD Terminating and retries, the same failure mode as that teardown. We do NOT
+		// release the finalizer until this succeeds, so the spoke is never orphaned.
+		if clusterkube.IsRemote(cd.Spec.Deploy) {
+			tctx, cancel := context.WithTimeout(ctx, reconcileTimeout)
+			defer cancel()
+			spoke, err := clusterkube.Remote(tctx, r.hub, cd.Namespace, cd.Spec.Deploy)
+			if err != nil {
+				return reconcile.Result{}, fmt.Errorf("compositionmirror: reaching spoke to tear down %s/%s: %w", cd.Namespace, cd.Name, err)
+			}
+			// nil desired set: no mirror is wanted now, so garbageCollect removes every managed one
+			// (and only those — never an instance authored directly on the spoke).
+			if err := garbageCollect(tctx, spoke.Dynamic.Resource(gvr).Namespace(cd.Namespace), nil, r.log); err != nil {
+				return reconcile.Result{}, fmt.Errorf("compositionmirror: tearing down spoke mirrors for %s/%s: %w", cd.Namespace, cd.Name, err)
+			}
+		}
+	}
+	controllerutil.RemoveFinalizer(cd, cdFinalizer)
+	if err := r.hub.Update(ctx, cd); err != nil {
+		return reconcile.Result{}, err
+	}
+	return reconcile.Result{}, nil
+}
+
+// deleteAllHubCompositions issues a delete for every hub Composition of the given Kind in the
+// namespace. A missing resource (its CRD already gone) and already-absent instances are treated as
+// success.
+func deleteAllHubCompositions(ctx context.Context, hubDyn dynamic.Interface, gvr schema.GroupVersionResource, ns string) error {
+	res := hubDyn.Resource(gvr).Namespace(ns)
+	list, err := res.List(ctx, metav1.ListOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("listing hub compositions: %w", err)
+	}
+	for i := range list.Items {
+		name := list.Items[i].GetName()
+		if err := res.Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("deleting hub composition %q: %w", name, err)
+		}
+	}
+	return nil
 }
 
 // ensureWatch registers a dynamic informer-backed watch on the given generated composition Kind the

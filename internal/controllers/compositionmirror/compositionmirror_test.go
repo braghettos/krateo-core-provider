@@ -16,6 +16,7 @@ import (
 	clienttesting "k8s.io/client-go/testing"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
@@ -260,5 +261,114 @@ func TestReflectInstances_StatusIdempotent(t *testing.T) {
 	}
 	if statusWrites != 0 {
 		t.Errorf("expected 0 hub status writes when status is unchanged, got %d — would loop the dynamic watch", statusWrites)
+	}
+}
+
+// A live remote CD gets the hub-teardown finalizer so the reflector observes its deletion. (The
+// reconcile then errors on the missing spoke, but the finalizer must already be persisted.)
+func TestReconcile_AddsFinalizerToRemoteCD(t *testing.T) {
+	ctx := context.Background()
+	cd := remoteCD("remote-cd", "krateo-system", "missing-target")
+	cd.Status.ApiVersion = testAPIVersion
+	cd.Status.Kind = testKind
+	cd.Status.Resource = "portals"
+
+	r := newReconciler(t, cd)
+	_, _ = r.Reconcile(ctx, reconcileReq("remote-cd", "krateo-system"))
+
+	got := &compositiondefinitionsv1alpha1.CompositionDefinition{}
+	if err := r.hub.Get(ctx, types.NamespacedName{Name: "remote-cd", Namespace: "krateo-system"}, got); err != nil {
+		t.Fatalf("get CD: %v", err)
+	}
+	if !controllerutil.ContainsFinalizer(got, cdFinalizer) {
+		t.Errorf("remote CD should carry the hub-teardown finalizer, has %v", got.GetFinalizers())
+	}
+}
+
+func deletingCD(t *testing.T, name, targetRef string) client.Client {
+	t.Helper()
+	ctx := context.Background()
+	cd := remoteCD(name, "krateo-system", targetRef)
+	cd.Status.ApiVersion = testAPIVersion
+	cd.Status.Kind = testKind
+	cd.Status.Resource = "portals"
+	cd.SetFinalizers([]string{cdFinalizer})
+
+	scheme := runtime.NewScheme()
+	if err := compositiondefinitionsv1alpha1.SchemeBuilder.AddToScheme(scheme); err != nil {
+		t.Fatalf("add scheme: %v", err)
+	}
+	hub := fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(cd).Build()
+	// Delete: because the CD carries a finalizer this only sets deletionTimestamp.
+	if err := hub.Delete(ctx, cd); err != nil {
+		t.Fatalf("delete CD: %v", err)
+	}
+	return hub
+}
+
+func hasCDFinalizer(t *testing.T, hub client.Client, name string) (found, present bool) {
+	t.Helper()
+	got := &compositiondefinitionsv1alpha1.CompositionDefinition{}
+	err := hub.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "krateo-system"}, got)
+	if apierrors.IsNotFound(err) {
+		return false, false
+	}
+	if err != nil {
+		t.Fatalf("get CD: %v", err)
+	}
+	return true, controllerutil.ContainsFinalizer(got, cdFinalizer)
+}
+
+// A finalized CD with no remote target still cleans up its hub Composition instances and releases the
+// finalizer — the hub side never wedges, and no spoke is required.
+func TestReconcile_DeleteCleansHubAndReleases(t *testing.T) {
+	ctx := context.Background()
+	hub := deletingCD(t, "local-cd", "") // no targetRef -> local: skips the spoke teardown
+	hubDyn := newFakeDyn(portal("portal-1", nil, false), portal("portal-2", nil, false))
+
+	r := &Reconciler{hub: hub, hubDynamic: hubDyn, log: logging.NewNopLogger()}
+	if _, err := r.Reconcile(ctx, reconcileReq("local-cd", "krateo-system")); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	res := hubDyn.Resource(testGVR).Namespace(testNamespace)
+	for _, n := range []string{"portal-1", "portal-2"} {
+		if _, err := res.Get(ctx, n, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+			t.Errorf("hub composition %s should be deleted on teardown, got err=%v", n, err)
+		}
+	}
+	if found, present := hasCDFinalizer(t, hub, "local-cd"); found && present {
+		t.Errorf("finalizer should be released once teardown completes")
+	}
+}
+
+// Fail-safe: a remote CD whose spoke is unreachable at delete time must NOT release the finalizer — it
+// stays Terminating and retries, so the spoke mirrors can never be orphaned by a premature release.
+func TestReconcile_DeleteBlocksOnUnreachableSpoke(t *testing.T) {
+	ctx := context.Background()
+	hub := deletingCD(t, "remote-cd", "missing-target") // target doesn't exist -> clusterkube.Remote fails
+
+	r := &Reconciler{hub: hub, hubDynamic: newFakeDyn(), log: logging.NewNopLogger()}
+	if _, err := r.Reconcile(ctx, reconcileReq("remote-cd", "krateo-system")); err == nil {
+		t.Fatal("expected an error when the spoke is unreachable at teardown, got nil")
+	}
+	found, present := hasCDFinalizer(t, hub, "remote-cd")
+	if !found || !present {
+		t.Errorf("finalizer must NOT be released while the spoke is unreachable (found=%v present=%v)", found, present)
+	}
+}
+
+func TestDeleteAllHubCompositions(t *testing.T) {
+	ctx := context.Background()
+	hubDyn := newFakeDyn(portal("a", nil, false), portal("b", nil, false))
+	if err := deleteAllHubCompositions(ctx, hubDyn, testGVR, testNamespace); err != nil {
+		t.Fatalf("deleteAllHubCompositions: %v", err)
+	}
+	list, err := hubDyn.Resource(testGVR).Namespace(testNamespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(list.Items) != 0 {
+		t.Errorf("expected all hub compositions deleted, %d remain", len(list.Items))
 	}
 }
