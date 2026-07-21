@@ -4,13 +4,18 @@ import (
 	"context"
 	"testing"
 
+	compositiondefinitionsv1alpha1 "github.com/krateoplatformops/core-provider/apis/compositiondefinitions/v1alpha1"
 	"github.com/krateoplatformops/provider-runtime/pkg/logging"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 const (
@@ -119,5 +124,72 @@ func TestReflectInstances(t *testing.T) {
 	// unmanaged instance left untouched.
 	if _, err := spokeRes.Get(ctx, "portal-foreign", metav1.GetOptions{}); err != nil {
 		t.Errorf("portal-foreign (unmanaged) must survive GC, got err=%v", err)
+	}
+}
+
+func remoteCD(name, ns, targetRef string) *compositiondefinitionsv1alpha1.CompositionDefinition {
+	cd := &compositiondefinitionsv1alpha1.CompositionDefinition{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+	}
+	if targetRef != "" {
+		cd.Spec.Deploy = &compositiondefinitionsv1alpha1.DeploymentTarget{
+			TargetRef: &compositiondefinitionsv1alpha1.TargetReference{Name: targetRef},
+		}
+	}
+	return cd
+}
+
+func newReconciler(t *testing.T, objs ...client.Object) *Reconciler {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	if err := compositiondefinitionsv1alpha1.SchemeBuilder.AddToScheme(scheme); err != nil {
+		t.Fatalf("add scheme: %v", err)
+	}
+	hub := fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
+	return &Reconciler{hub: hub, hubDynamic: newFakeDyn(), log: logging.NewNopLogger()}
+}
+
+func reconcileReq(name, ns string) reconcile.Request {
+	return reconcile.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: ns}}
+}
+
+// A local CompositionDefinition (no deploy.targetRef) is a strict no-op for the reflector.
+func TestReconcile_LocalIsNoOp(t *testing.T) {
+	r := newReconciler(t, remoteCD("local-cd", "krateo-system", ""))
+	res, err := r.Reconcile(context.Background(), reconcileReq("local-cd", "krateo-system"))
+	if err != nil {
+		t.Fatalf("local CD reconcile: unexpected error %v", err)
+	}
+	if res != (reconcile.Result{}) {
+		t.Fatalf("local CD reconcile should not requeue, got %+v", res)
+	}
+}
+
+// A remote CD whose generated GVK is not yet recorded requeues on the short pending interval and does
+// not reach the spoke.
+func TestReconcile_PendingGVKRequeuesShort(t *testing.T) {
+	r := newReconciler(t, remoteCD("pending-cd", "krateo-system", "spoke"))
+	res, err := r.Reconcile(context.Background(), reconcileReq("pending-cd", "krateo-system"))
+	if err != nil {
+		t.Fatalf("pending CD reconcile: unexpected error %v", err)
+	}
+	if res.RequeueAfter != requeuePending {
+		t.Fatalf("pending CD should requeue after %v, got %v", requeuePending, res.RequeueAfter)
+	}
+}
+
+// Failure isolation: when the spoke is unreachable (its KubernetesTarget is missing), the reflector
+// SURFACES the error so controller-runtime applies rate-limited backoff — rather than swallowing it
+// and hammering the dead target at the flat resync interval.
+func TestReconcile_UnreachableSpokeSurfacesError(t *testing.T) {
+	cd := remoteCD("remote-cd", "krateo-system", "missing-target")
+	cd.Status.ApiVersion = testAPIVersion
+	cd.Status.Kind = testKind
+	cd.Status.Resource = "portals"
+
+	r := newReconciler(t, cd)
+	_, err := r.Reconcile(context.Background(), reconcileReq("remote-cd", "krateo-system"))
+	if err == nil {
+		t.Fatal("expected reconcile to return an error for an unreachable spoke (backoff), got nil")
 	}
 }
