@@ -2,6 +2,7 @@ package compositionmirror
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	compositiondefinitionsv1alpha1 "github.com/krateoplatformops/core-provider/apis/compositiondefinitions/v1alpha1"
@@ -12,6 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/dynamic"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	clienttesting "k8s.io/client-go/testing"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -51,6 +53,29 @@ func newFakeDyn(objs ...runtime.Object) *dynamicfake.FakeDynamicClient {
 	)
 }
 
+// staticResolver returns the same spoke for every target — the single-spoke (no fan-out) case.
+func staticResolver(dyn dynamic.Interface) spokeResolver {
+	return func(context.Context, string) (dynamic.Interface, error) { return dyn, nil }
+}
+
+// mapResolver injects a distinct fake spoke per target name, so the fan-out engine can be exercised
+// across several spokes without a real clusterkube.Remote.
+func mapResolver(m map[string]dynamic.Interface) spokeResolver {
+	return func(_ context.Context, target string) (dynamic.Interface, error) {
+		dyn, ok := m[target]
+		if !ok {
+			return nil, fmt.Errorf("no spoke registered for target %q", target)
+		}
+		return dyn, nil
+	}
+}
+
+// withTarget stamps the krateo.io/target fan-out annotation onto a hub Composition.
+func withTarget(u *unstructured.Unstructured, target string) *unstructured.Unstructured {
+	u.SetAnnotations(map[string]string{targetAnnotation: target})
+	return u
+}
+
 // reflectInstances must, in one pass: create a hub-only instance on the spoke, force the hub spec
 // onto a drifted spoke mirror (hub wins), read the spoke status back onto the hub instance, delete a
 // managed spoke mirror with no hub counterpart, and leave an unmanaged spoke instance untouched.
@@ -74,13 +99,14 @@ func TestReflectInstances(t *testing.T) {
 	)
 
 	if err := reflectInstances(ctx, reflectParams{
-		hub:        hub,
-		spoke:      spoke,
-		gvr:        testGVR,
-		apiVersion: testAPIVersion,
-		kind:       testKind,
-		namespace:  testNamespace,
-		log:        logging.NewNopLogger(),
+		hub:           hub,
+		resolveSpoke:  staticResolver(spoke),
+		defaultTarget: "spoke",
+		gvr:           testGVR,
+		apiVersion:    testAPIVersion,
+		kind:          testKind,
+		namespace:     testNamespace,
+		log:           logging.NewNopLogger(),
 	}); err != nil {
 		t.Fatalf("reflectInstances: %v", err)
 	}
@@ -126,6 +152,155 @@ func TestReflectInstances(t *testing.T) {
 	// unmanaged instance left untouched.
 	if _, err := spokeRes.Get(ctx, "portal-foreign", metav1.GetOptions{}); err != nil {
 		t.Errorf("portal-foreign (unmanaged) must survive GC, got err=%v", err)
+	}
+}
+
+// Fan-out: an instance carrying krateo.io/target is mirrored to the annotated target's spoke, while an
+// unannotated instance goes to the CD's default spoke. Each spoke is garbage-collected only against
+// the instances bound to IT — so a managed orphan on the annotated spoke is removed, and neither
+// instance leaks onto the other's spoke.
+func TestReflectInstances_FanOut(t *testing.T) {
+	ctx := context.Background()
+
+	// Hub: portal-default has no annotation (-> default spoke); portal-tenant targets "spoke-b".
+	hub := newFakeDyn(
+		portal("portal-default", map[string]interface{}{"replicas": int64(2)}, false),
+		withTarget(portal("portal-tenant", map[string]interface{}{"replicas": int64(7)}, false), "spoke-b"),
+	)
+
+	spokeDefault := newFakeDyn()
+	// spoke-b already holds a managed mirror with no hub counterpart bound to it -> must be GC'd.
+	spokeB := newFakeDyn(portal("portal-orphan-b", map[string]interface{}{}, true))
+
+	if err := reflectInstances(ctx, reflectParams{
+		hub: hub,
+		resolveSpoke: mapResolver(map[string]dynamic.Interface{
+			"spoke-default": spokeDefault,
+			"spoke-b":       spokeB,
+		}),
+		defaultTarget: "spoke-default",
+		gvr:           testGVR,
+		apiVersion:    testAPIVersion,
+		kind:          testKind,
+		namespace:     testNamespace,
+		log:           logging.NewNopLogger(),
+	}); err != nil {
+		t.Fatalf("reflectInstances: %v", err)
+	}
+
+	defRes := spokeDefault.Resource(testGVR).Namespace(testNamespace)
+	bRes := spokeB.Resource(testGVR).Namespace(testNamespace)
+
+	// portal-default mirrored to the default spoke only.
+	if d, err := defRes.Get(ctx, "portal-default", metav1.GetOptions{}); err != nil {
+		t.Fatalf("portal-default not on default spoke: %v", err)
+	} else if r, _, _ := unstructured.NestedInt64(d.Object, "spec", "replicas"); r != 2 {
+		t.Errorf("portal-default spec.replicas = %d, want 2", r)
+	}
+	if _, err := bRes.Get(ctx, "portal-default", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("portal-default must NOT leak onto the annotated spoke, got err=%v", err)
+	}
+
+	// portal-tenant mirrored to the annotated spoke only.
+	if b, err := bRes.Get(ctx, "portal-tenant", metav1.GetOptions{}); err != nil {
+		t.Fatalf("portal-tenant not on spoke-b: %v", err)
+	} else if r, _, _ := unstructured.NestedInt64(b.Object, "spec", "replicas"); r != 7 {
+		t.Errorf("portal-tenant spec.replicas = %d, want 7", r)
+	}
+	if _, err := defRes.Get(ctx, "portal-tenant", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("portal-tenant must NOT leak onto the default spoke, got err=%v", err)
+	}
+
+	// The annotated spoke's own orphan is garbage-collected (per-target desired set).
+	if _, err := bRes.Get(ctx, "portal-orphan-b", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("portal-orphan-b should be garbage-collected on spoke-b, got err=%v", err)
+	}
+}
+
+// Retarget: an instance's krateo.io/target now points at spoke-b, but a stale managed mirror still sits
+// on spoke-a — which no current annotation names, so only the namespace sweep (injected sweepTargets)
+// reaches it. reflectInstances must GC the stale mirror on spoke-a, create the mirror on spoke-b, and
+// leave an UNMANAGED instance on spoke-a untouched.
+func TestReflectInstances_RetargetSweepsOrphan(t *testing.T) {
+	ctx := context.Background()
+
+	hub := newFakeDyn(
+		withTarget(portal("portal-tenant", map[string]interface{}{"replicas": int64(3)}, false), "spoke-b"),
+	)
+
+	// spoke-a: the stale managed mirror + an unmanaged foreign instance. spoke-b: empty.
+	spokeA := newFakeDyn(
+		portal("portal-tenant", map[string]interface{}{"replicas": int64(3)}, true),
+		portal("portal-foreign", map[string]interface{}{}, false),
+	)
+	spokeB := newFakeDyn()
+
+	if err := reflectInstances(ctx, reflectParams{
+		hub: hub,
+		resolveSpoke: mapResolver(map[string]dynamic.Interface{
+			"spoke-default": newFakeDyn(),
+			"spoke-a":       spokeA,
+			"spoke-b":       spokeB,
+		}),
+		defaultTarget: "spoke-default",
+		sweepTargets:  []string{"spoke-a"}, // no instance targets spoke-a anymore, but it must be swept
+		gvr:           testGVR,
+		apiVersion:    testAPIVersion,
+		kind:          testKind,
+		namespace:     testNamespace,
+		log:           logging.NewNopLogger(),
+	}); err != nil {
+		t.Fatalf("reflectInstances: %v", err)
+	}
+
+	aRes := spokeA.Resource(testGVR).Namespace(testNamespace)
+	bRes := spokeB.Resource(testGVR).Namespace(testNamespace)
+
+	// Stale managed mirror on spoke-a is garbage-collected by the sweep.
+	if _, err := aRes.Get(ctx, "portal-tenant", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("retargeted-away mirror on spoke-a should be swept, got err=%v", err)
+	}
+	// The unmanaged instance on spoke-a survives (sweep only ever touches our own mirrors).
+	if _, err := aRes.Get(ctx, "portal-foreign", metav1.GetOptions{}); err != nil {
+		t.Errorf("unmanaged instance on spoke-a must survive the sweep, got err=%v", err)
+	}
+	// The mirror is now present on the new target spoke-b.
+	if _, err := bRes.Get(ctx, "portal-tenant", metav1.GetOptions{}); err != nil {
+		t.Errorf("portal-tenant should be mirrored to spoke-b, got err=%v", err)
+	}
+}
+
+// A resolve failure on a sweep-only target (one with no instances) must NOT fail the reconcile: an
+// unreachable or unrelated namespace KubernetesTarget can't break this CD's reflection. The live
+// instance still reflects to its default spoke.
+func TestReflectInstances_SweepOnlyResolveFailureIsNonFatal(t *testing.T) {
+	ctx := context.Background()
+
+	hub := newFakeDyn(portal("portal-x", map[string]interface{}{"replicas": int64(1)}, false))
+	spokeDefault := newFakeDyn()
+
+	err := reflectInstances(ctx, reflectParams{
+		hub: hub,
+		resolveSpoke: func(_ context.Context, target string) (dynamic.Interface, error) {
+			if target == "dead" {
+				return nil, fmt.Errorf("boom: %q unreachable", target)
+			}
+			return spokeDefault, nil
+		},
+		defaultTarget: "spoke-default",
+		sweepTargets:  []string{"dead"}, // no instance targets "dead" -> best-effort, must not fail
+		gvr:           testGVR,
+		apiVersion:    testAPIVersion,
+		kind:          testKind,
+		namespace:     testNamespace,
+		log:           logging.NewNopLogger(),
+	})
+	if err != nil {
+		t.Fatalf("sweep-only resolve failure must be non-fatal, got %v", err)
+	}
+	// The live instance still reflected despite the dead sweep target.
+	if _, err := spokeDefault.Resource(testGVR).Namespace(testNamespace).Get(ctx, "portal-x", metav1.GetOptions{}); err != nil {
+		t.Errorf("portal-x should still be mirrored to the default spoke, got err=%v", err)
 	}
 }
 
@@ -254,7 +429,7 @@ func TestReflectInstances_StatusIdempotent(t *testing.T) {
 	})
 
 	if err := reflectInstances(ctx, reflectParams{
-		hub: hub, spoke: spoke, gvr: testGVR,
+		hub: hub, resolveSpoke: staticResolver(spoke), defaultTarget: "spoke", gvr: testGVR,
 		apiVersion: testAPIVersion, kind: testKind, namespace: testNamespace, log: logging.NewNopLogger(),
 	}); err != nil {
 		t.Fatalf("reflectInstances: %v", err)
@@ -285,7 +460,7 @@ func TestReconcile_AddsFinalizerToRemoteCD(t *testing.T) {
 	}
 }
 
-func deletingCD(t *testing.T, name, targetRef string) client.Client {
+func deletingCD(t *testing.T, name, targetRef string, extra ...client.Object) client.Client {
 	t.Helper()
 	ctx := context.Background()
 	cd := remoteCD(name, "krateo-system", targetRef)
@@ -298,7 +473,7 @@ func deletingCD(t *testing.T, name, targetRef string) client.Client {
 	if err := compositiondefinitionsv1alpha1.SchemeBuilder.AddToScheme(scheme); err != nil {
 		t.Fatalf("add scheme: %v", err)
 	}
-	hub := fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(cd).Build()
+	hub := fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(append([]client.Object{cd}, extra...)...).Build()
 	// Delete: because the CD carries a finalizer this only sets deletionTimestamp.
 	if err := hub.Delete(ctx, cd); err != nil {
 		t.Fatalf("delete CD: %v", err)
@@ -355,6 +530,75 @@ func TestReconcile_DeleteBlocksOnUnreachableSpoke(t *testing.T) {
 	found, present := hasCDFinalizer(t, hub, "remote-cd")
 	if !found || !present {
 		t.Errorf("finalizer must NOT be released while the spoke is unreachable (found=%v present=%v)", found, present)
+	}
+}
+
+// Fan-out teardown: on CD delete the reflector must garbage-collect the managed mirrors on EVERY spoke
+// its instances fanned out to (default + each krateo.io/target), AND sweep the other KubernetesTargets
+// in the namespace so a mirror left on a spoke an instance was retargeted away from is also collected —
+// then release the finalizer. The live targets are read from the hub Compositions before they are
+// deleted; spoke-c is a namespace target no current annotation names but which still holds an orphan.
+func TestReconcile_DeleteCleansAllFanOutTargets(t *testing.T) {
+	ctx := context.Background()
+	// spoke-c: a namespace KubernetesTarget nothing currently references (an instance was retargeted
+	// away from it), leaving a managed orphan there that the namespace sweep must still collect.
+	ktC := &compositiondefinitionsv1alpha1.KubernetesTarget{
+		ObjectMeta: metav1.ObjectMeta{Name: "spoke-c", Namespace: "krateo-system"},
+	}
+	hub := deletingCD(t, "remote-cd", "spoke-default", ktC)
+
+	// Hub Compositions record the live fan-out: portal-default -> default spoke, portal-tenant -> spoke-b.
+	hubDyn := newFakeDyn(
+		portal("portal-default", map[string]interface{}{}, false),
+		withTarget(portal("portal-tenant", map[string]interface{}{}, false), "spoke-b"),
+	)
+
+	// Each spoke holds a managed mirror teardown must delete; spoke-c's is a retargeted-away orphan.
+	spokeDefault := newFakeDyn(portal("portal-default", map[string]interface{}{}, true))
+	spokeB := newFakeDyn(portal("portal-tenant", map[string]interface{}{}, true))
+	spokeC := newFakeDyn(portal("portal-ghost", map[string]interface{}{}, true))
+	spokes := map[string]dynamic.Interface{
+		"spoke-default": spokeDefault, "spoke-b": spokeB, "spoke-c": spokeC,
+	}
+
+	r := &Reconciler{
+		hub:        hub,
+		hubDynamic: hubDyn,
+		log:        logging.NewNopLogger(),
+		newSpoke: func(_ context.Context, _ client.Client, _, target string) (dynamic.Interface, error) {
+			dyn, ok := spokes[target]
+			if !ok {
+				return nil, fmt.Errorf("no spoke for target %q", target)
+			}
+			return dyn, nil
+		},
+	}
+	if _, err := r.Reconcile(ctx, reconcileReq("remote-cd", "krateo-system")); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	// The two live spokes AND the swept namespace spoke all have their managed mirrors removed.
+	for _, tc := range []struct {
+		spoke dynamic.Interface
+		name  string
+	}{
+		{spokeDefault, "portal-default"},
+		{spokeB, "portal-tenant"},
+		{spokeC, "portal-ghost"},
+	} {
+		if _, err := tc.spoke.Resource(testGVR).Namespace(testNamespace).Get(ctx, tc.name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+			t.Errorf("mirror %s should be torn down, got err=%v", tc.name, err)
+		}
+	}
+
+	// Hub Compositions cleared and the finalizer released.
+	if list, err := hubDyn.Resource(testGVR).Namespace(testNamespace).List(ctx, metav1.ListOptions{}); err != nil {
+		t.Fatalf("list hub: %v", err)
+	} else if len(list.Items) != 0 {
+		t.Errorf("hub compositions should be deleted on teardown, %d remain", len(list.Items))
+	}
+	if found, present := hasCDFinalizer(t, hub, "remote-cd"); found && present {
+		t.Errorf("finalizer should be released once all fan-out spokes are torn down")
 	}
 }
 

@@ -157,8 +157,19 @@ and the spoke cdc are all unchanged.
 1. **Where "which spoke" lives — per-CD vs per-instance.** Per-CD `deploy.targetRef` (recommended)
    keeps `Composition.spec` pure but sends *all* instances of a Kind to one spoke. Per-instance
    fan-out (same Portal type, different spoke per tenant) can't live in `spec` without polluting the
-   values, so it would be a `Composition` **annotation** (`krateo.io/target: <name>`) escape hatch.
-   Default per-CD; add the annotation later if fan-out is needed.
+   values, so it is a `Composition` **annotation** (`krateo.io/target: <name>`) escape hatch.
+   Default per-CD; the annotation overrides it per instance.
+
+   **Implemented (fan-out).** The reflector resolves each hub `Composition`'s target from
+   `krateo.io/target` (else the CD default), groups instances by resolved target, and reconciles each
+   spoke with exactly the instances bound to it — mirror down + status back + a per-target GC (desired
+   = that spoke's instances). **Retarget cleanup:** because a spoke an instance was *moved away from*
+   is named by no current annotation, the reflector additionally sweeps every `KubernetesTarget` in
+   the CD's namespace for orphaned mirrors (best-effort; GC is `Kind`+managed-label scoped, so it only
+   ever removes this reflector's own mirrors of that Kind). So a retargeted-away orphan **is** now
+   collected — at steady-state resync, and on CD teardown for every reachable spoke. The one residual
+   is an orphan on a spoke that is *both* retargeted-away-from *and* permanently unreachable; a
+   per-mirror finalizer would close even that (design §7).
 
 2. **Mirror-CR vs direct-render.** *Recommended: mirror-CR* — reflect hub → a spoke `Composition`,
    let the spoke cdc render it. It reuses the entire projection stack and keeps the spoke
