@@ -894,6 +894,108 @@ func (e *external) applyHubCompositionCRD(ctx context.Context, crd *apiextension
 	return nil
 }
 
+// syncHubCompositionCRDVersions converges the hub (mgmt) composition CRD's served/stored version set
+// onto the finalized spoke CRD's, closing the hub↔spoke version skew (docs/design/remote-composition-mirror.md §7).
+// The hub apply (applyHubCompositionCRD -> ApplyOrUpdateCRD) only ever APPENDS versions, while the
+// spoke's version set is PRUNED over chart-version bumps (pruneStaleServedVersions). Without this the
+// hub CRD keeps every version hop's served endpoint forever, drifting from the spoke — dead weight,
+// and a stale served endpoint a hub client could pick. No-op for local CDs (the composition CRD lives
+// only on the provisioning cluster, which is the hub).
+//
+// spokeCRD is the LIVE, post-prune spoke CRD whose Spec.Versions is the source of truth; its
+// per-version schemas already carry the composition-version printer column, and its Spec.Conversion is
+// None — mirroring them preserves both. This never touches the spoke, pruneSet, or Status.Managed: it
+// reads the hub CRD, reconciles its Spec.Versions to the spoke's (adds missing, drops versions the
+// spoke no longer serves — never "vacuum"), and applies.
+func (e *external) syncHubCompositionCRDVersions(ctx context.Context, spokeCRD *apiextensionsv1.CustomResourceDefinition) error {
+	if !e.remote || spokeCRD == nil {
+		return nil
+	}
+	gr := schema.GroupResource{Group: spokeCRD.Spec.Group, Resource: spokeCRD.Spec.Names.Plural}
+	hubCRD, err := crdclient.Get(ctx, e.mgmt, gr)
+	if err != nil {
+		return fmt.Errorf("error getting hub composition CRD for version sync: %w", err)
+	}
+	if hubCRD == nil {
+		// applyHubCompositionCRD runs earlier in this reconcile; if the hub CRD is somehow absent
+		// there is nothing to converge here.
+		return nil
+	}
+
+	// Desired served-version set = the spoke's (vacuum + the current served version + any coexisting
+	// served version the spoke still keeps).
+	want := map[string]bool{}
+	for i := range spokeCRD.Spec.Versions {
+		want[spokeCRD.Spec.Versions[i].Name] = true
+	}
+	// Versions the hub carries that the spoke has pruned are stale (never "vacuum", the hub storage
+	// version). Also track whether the hub is missing any version the spoke serves.
+	pruneSet := map[string]bool{}
+	var pruned []string
+	have := map[string]bool{}
+	for i := range hubCRD.Spec.Versions {
+		name := hubCRD.Spec.Versions[i].Name
+		have[name] = true
+		if name != "vacuum" && !want[name] {
+			pruneSet[name] = true
+			pruned = append(pruned, name)
+		}
+	}
+	missing := false
+	for name := range want {
+		if !have[name] {
+			missing = true
+			break
+		}
+	}
+	if len(pruneSet) == 0 && !missing {
+		return nil // hub already matches the spoke's version set
+	}
+
+	// The apiserver forbids removing a version from spec.versions while it is still listed in
+	// status.storedVersions (a version that was, at some point, the hub's storage version — e.g. the
+	// first served version before "vacuum" took over). Trim the pruned versions out of storedVersions
+	// FIRST via the status subresource, then rewrite spec.versions — mirroring the spoke prune. Safe:
+	// the hub's storage version is "vacuum" (never pruned), so no live data is lost.
+	if len(pruneSet) > 0 {
+		var keptStored []string
+		for _, sv := range hubCRD.Status.StoredVersions {
+			if !pruneSet[sv] {
+				keptStored = append(keptStored, sv)
+			}
+		}
+		if len(keptStored) != len(hubCRD.Status.StoredVersions) {
+			hubCRD.Status.StoredVersions = keptStored
+			if err := e.mgmt.Status().Update(ctx, hubCRD); err != nil {
+				return fmt.Errorf("trimming hub storedVersions before version sync: %w", err)
+			}
+		}
+	}
+
+	// Mirror the spoke's finalized version set (schemas, served/storage flags, printer columns) onto
+	// the hub in one shot: this both drops the pruned versions and adds any the hub was missing.
+	hubCRD.Spec.Versions = make([]apiextensionsv1.CustomResourceDefinitionVersion, 0, len(spokeCRD.Spec.Versions))
+	for i := range spokeCRD.Spec.Versions {
+		hubCRD.Spec.Versions = append(hubCRD.Spec.Versions, *spokeCRD.Spec.Versions[i].DeepCopy())
+	}
+	// Keep None conversion and the composition-version printer column explicit (idempotent): the spoke
+	// versions already carry both, but this guards a spoke CRD that predates either.
+	if spokeCRD.Spec.Conversion != nil {
+		hubCRD.Spec.Conversion = spokeCRD.Spec.Conversion.DeepCopy()
+	}
+	crdutils.AddCompositionVersionColumn(hubCRD)
+
+	// A preceding Status().Update (or the direct client used for remote targets) can leave the CRD's
+	// TypeMeta unset; kube.Apply derives the GVK from the object, so set it explicitly — mirroring
+	// crdclient.Get.
+	hubCRD.SetGroupVersionKind(apiextensionsv1.SchemeGroupVersion.WithKind("CustomResourceDefinition"))
+	if err := kube.Apply(ctx, e.mgmt, hubCRD, kube.ApplyOptions{}); err != nil {
+		return fmt.Errorf("applying hub composition CRD version sync: %w", err)
+	}
+	e.log.Info("Synced hub composition CRD served versions to spoke", "gvr", gr.String(), "pruned", pruned)
+	return nil
+}
+
 func (e *external) Create(ctx context.Context, mg resource.Managed) error {
 	cr, ok := mg.(*compositiondefinitionsv1alpha1.CompositionDefinition)
 	if !ok {
@@ -1264,6 +1366,16 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 	// live CRD carries the full served-version set, so the projection stays stable and per-version
 	// Chart is preserved. Fall back to the generated CRD if the live one can't be fetched.
 	liveCRD, getErr := crdclient.Get(ctx, e.kube, gvr.GroupResource())
+	// Converge the hub composition CRD's served-version set onto the finalized spoke CRD, so the hub
+	// does not accumulate served versions the spoke has pruned (hub↔spoke version skew). Uses the LIVE
+	// spoke CRD (post-prune) as the source of truth; skipped when it can't be read (nothing reliable to
+	// mirror). Best-effort, like the spoke prune above: a failure is logged and re-driven on the next
+	// version bump rather than blocking the reconcile. No-op for local CDs.
+	if getErr == nil && liveCRD != nil {
+		if err := e.syncHubCompositionCRDVersions(ctx, liveCRD); err != nil {
+			log.Info("hub composition CRD version sync failed (next version bump will re-drive)", "error", err.Error())
+		}
+	}
 	if getErr != nil || liveCRD == nil {
 		liveCRD = crd
 	}
