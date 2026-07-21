@@ -182,6 +182,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 	ctx, cancel := context.WithTimeout(ctx, reconcileTimeout)
 	defer cancel()
 
+	// Every KubernetesTarget in the CD's namespace is also swept for orphaned mirrors of this Kind, so a
+	// spoke an instance was retargeted AWAY from (its annotation now names another target) still gets its
+	// stale mirror collected — the current annotation set alone would miss it. Best-effort: a failure to
+	// list targets just skips the orphan sweep this pass (retried next resync); it never blocks the
+	// reflection of the CD's live targets, and the GC is Kind+label scoped so it can only ever touch this
+	// reflector's own mirrors of THIS Kind, never another CD's.
+	sweepTargets, err := r.namespaceTargets(ctx, cd.Namespace)
+	if err != nil {
+		r.log.Debug("compositionmirror: listing namespace targets for orphan sweep failed", "cd", req.String(), "error", err)
+	}
+
 	// Each hub instance is mirrored to the spoke named by its krateo.io/target annotation, or to the
 	// CD's default deploy target when unannotated. Spoke clients are built per resolved target and
 	// memoized for this reconcile (spokeResolverFor), so many instances bound to one spoke share a
@@ -190,6 +201,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 		hub:           r.hubDynamic,
 		resolveSpoke:  r.spokeResolverFor(cd.Namespace),
 		defaultTarget: cd.Spec.Deploy.TargetRef.Name,
+		sweepTargets:  sweepTargets,
 		gvr:           gvr,
 		apiVersion:    cd.Status.ApiVersion,
 		kind:          cd.Status.Kind,
@@ -230,19 +242,23 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, cd *compositiondefinit
 		// and the CompositionDefinition's own teardown waits for the spoke composition instances to be
 		// gone before it removes the cdc/CRD — so leaving the mirrors would deadlock that teardown.
 		// Bounded + spoke-dependent: an unreachable spoke keeps the CD Terminating and retries, the same
-		// failure mode as that teardown. We do NOT release the finalizer until every target succeeds.
+		// failure mode as that teardown. We do NOT release the finalizer until every live target succeeds.
 		if clusterkube.IsRemote(cd.Spec.Deploy) {
 			tctx, cancel := context.WithTimeout(ctx, reconcileTimeout)
 			defer cancel()
 
-			// Discover the fan-out targets from the live hub Compositions (before deleting them, above).
-			targets, err := mirrorTargets(tctx, r.hubDynamic, gvr, cd.Namespace, cd.Spec.Deploy.TargetRef.Name)
+			// This CD's live targets: the current-annotation targets + the default, read from the live hub
+			// Compositions BEFORE they are deleted (below). These MUST be torn down — they are the spokes
+			// this CD is actively mirroring to — so a failure here keeps the CD Terminating and retries.
+			liveTargets, err := mirrorTargets(tctx, r.hubDynamic, gvr, cd.Namespace, cd.Spec.Deploy.TargetRef.Name)
 			if err != nil {
 				return reconcile.Result{}, fmt.Errorf("compositionmirror: enumerating spoke targets for %s/%s: %w", cd.Namespace, cd.Name, err)
 			}
 
 			resolve := r.spokeResolverFor(cd.Namespace)
-			for _, target := range targets {
+			live := make(map[string]struct{}, len(liveTargets))
+			for _, target := range liveTargets {
+				live[target] = struct{}{}
 				spoke, err := resolve(tctx, target)
 				if err != nil {
 					return reconcile.Result{}, fmt.Errorf("compositionmirror: reaching spoke %q to tear down %s/%s: %w", target, cd.Namespace, cd.Name, err)
@@ -253,9 +269,32 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, cd *compositiondefinit
 					return reconcile.Result{}, fmt.Errorf("compositionmirror: tearing down spoke %q mirrors for %s/%s: %w", target, cd.Namespace, cd.Name, err)
 				}
 			}
+
+			// Also sweep every OTHER KubernetesTarget in the namespace, to collect a mirror left on a spoke
+			// an instance was retargeted away from (no annotation names it anymore, so mirrorTargets can't
+			// see it). Best-effort: these targets are not this CD's active spokes, so an unreachable or
+			// unrelated one must NOT block this CD's teardown — log and continue. The GC is Kind+label
+			// scoped, so this can only ever remove this reflector's own mirrors of THIS Kind.
+			nsTargets, err := r.namespaceTargets(tctx, cd.Namespace)
+			if err != nil {
+				r.log.Debug("compositionmirror: listing namespace targets for teardown sweep failed", "cd", cd.Name, "error", err)
+			}
+			for _, target := range nsTargets {
+				if _, done := live[target]; done {
+					continue
+				}
+				spoke, err := resolve(tctx, target)
+				if err != nil {
+					r.log.Debug("compositionmirror: sweep-only spoke unreachable at teardown, skipping", "cd", cd.Name, "target", target, "error", err)
+					continue
+				}
+				if err := garbageCollect(tctx, spoke.Resource(gvr).Namespace(cd.Namespace), nil, r.log); err != nil {
+					r.log.Debug("compositionmirror: sweep-only teardown GC failed, skipping", "cd", cd.Name, "target", target, "error", err)
+				}
+			}
 		}
 
-		// Spokes are clean; now clear the hub Compositions (hub-only, always reachable).
+		// Live spokes are clean; now clear the hub Compositions (hub-only, always reachable).
 		if err := deleteAllHubCompositions(ctx, r.hubDynamic, gvr, cd.Namespace); err != nil {
 			return reconcile.Result{}, fmt.Errorf("compositionmirror: cleaning hub compositions for %s/%s: %w", cd.Namespace, cd.Name, err)
 		}
@@ -292,6 +331,22 @@ func mirrorTargets(ctx context.Context, hubDyn dynamic.Interface, gvr schema.Gro
 		targets = append(targets, t)
 	}
 	return targets, nil
+}
+
+// namespaceTargets lists the names of every KubernetesTarget in namespace ns. These are the candidate
+// spokes a CD's instances can fan out to; the reflector sweeps them for orphaned mirrors so a spoke an
+// instance was retargeted away from — one no current annotation names — still gets its stale mirror
+// collected. It reads from the hub, so it is always reachable; callers treat a failure as best-effort.
+func (r *Reconciler) namespaceTargets(ctx context.Context, ns string) ([]string, error) {
+	var list compositiondefinitionsv1alpha1.KubernetesTargetList
+	if err := r.hub.List(ctx, &list, client.InNamespace(ns)); err != nil {
+		return nil, fmt.Errorf("listing KubernetesTargets in %s: %w", ns, err)
+	}
+	names := make([]string, 0, len(list.Items))
+	for i := range list.Items {
+		names = append(names, list.Items[i].GetName())
+	}
+	return names, nil
 }
 
 // deleteAllHubCompositions issues a delete for every hub Composition of the given Kind in the
@@ -384,26 +439,33 @@ type reflectParams struct {
 	hub           dynamic.Interface
 	resolveSpoke  spokeResolver
 	defaultTarget string // CD spec.deploy.targetRef.Name — the spoke for instances without an annotation
-	gvr           schema.GroupVersionResource
-	apiVersion    string
-	kind          string
-	namespace     string
-	log           logging.Logger
+	// sweepTargets are additional spokes (every KubernetesTarget in the namespace) to garbage-collect
+	// for orphaned mirrors, even when no current instance targets them — so a spoke an instance was
+	// retargeted away from still gets its stale mirror collected. Best-effort: a sweep-only target that
+	// won't resolve or GC does not fail the reconcile (it isn't one this CD is actively mirroring to).
+	sweepTargets []string
+	gvr          schema.GroupVersionResource
+	apiVersion   string
+	kind         string
+	namespace    string
+	log          logging.Logger
 }
 
 // reflectInstances mirrors the hub Composition instances of one Kind (in a single namespace) onto their
 // spokes and reads their status back, then garbage-collects spoke mirrors with no hub counterpart.
 //
 // Instances are grouped by resolved target (krateo.io/target annotation, else defaultTarget) so each
-// spoke is reconciled with exactly the instances bound to it. The default target is always represented
-// — even with zero instances — so its spoke is still garbage-collected, matching the pre-fan-out
-// behavior where the sole spoke was reconciled (and emptied) every pass.
+// spoke is reconciled with exactly the instances bound to it. The set of spokes visited is the union of
+// the group targets, the default, and sweepTargets (every namespace KubernetesTarget) — the last so a
+// spoke an instance was RETARGETED AWAY from, which no current annotation names, still has its orphaned
+// mirror collected. Targets this CD actively mirrors to (any group target, and the default) are
+// authoritative: a resolve or GC failure there is returned so the reconcile backs off and retries.
+// Sweep-only targets (no instances of this CD) are best-effort: an unreachable or unrelated namespace
+// target is logged and skipped, never breaking this CD's reflection. The GC is Kind+label scoped, so
+// sweeping unrelated targets can only ever touch this reflector's own mirrors of THIS Kind.
 //
-// Caveat: a spoke that an annotated target names keeps mirrors only while ≥1 hub instance still points
-// at it; if every instance is retargeted away from an annotated spoke, that spoke drops out of the
-// group set and its now-orphaned mirror is not collected until the CD is deleted (reconcileDelete,
-// which sweeps all fan-out targets). This is the known limit of resync-driven, annotation-recorded
-// fan-out; a per-mirror finalizer or a broader sweep would close it (design §7).
+// Residual limit: an orphan on a spoke that is BOTH retargeted-away-from AND permanently unreachable is
+// not collected (its GC keeps being skipped best-effort); every reachable spoke is swept at resync.
 func reflectInstances(ctx context.Context, p reflectParams) error {
 	hubRes := p.hub.Resource(p.gvr).Namespace(p.namespace)
 
@@ -420,10 +482,30 @@ func reflectInstances(ctx context.Context, p reflectParams) error {
 		groups[target] = append(groups[target], inst)
 	}
 
-	for target, insts := range groups {
+	// The full set of spokes to visit: group targets (already includes the default) plus the sweep set.
+	sweepSet := make(map[string]struct{}, len(groups)+len(p.sweepTargets))
+	for target := range groups {
+		sweepSet[target] = struct{}{}
+	}
+	for _, target := range p.sweepTargets {
+		if target != "" {
+			sweepSet[target] = struct{}{}
+		}
+	}
+
+	for target := range sweepSet {
+		insts := groups[target] // nil for a sweep-only target
+		// Authoritative = this CD is actively mirroring to the target (it has instances, or it is the
+		// default). Only these fail the reconcile; sweep-only targets are best-effort.
+		authoritative := len(insts) > 0 || target == p.defaultTarget
+
 		spoke, err := p.resolveSpoke(ctx, target)
 		if err != nil {
-			return fmt.Errorf("building spoke for target %q: %w", target, err)
+			if authoritative {
+				return fmt.Errorf("building spoke for target %q: %w", target, err)
+			}
+			p.log.Debug("compositionmirror: sweep-only spoke unresolved, skipping", "target", target, "error", err)
+			continue
 		}
 		spokeRes := spoke.Resource(p.gvr).Namespace(p.namespace)
 
@@ -443,8 +525,13 @@ func reflectInstances(ctx context.Context, p reflectParams) error {
 			}
 		}
 
+		// desired may be empty (sweep-only target, or the default with no instances): garbageCollect then
+		// removes every managed mirror on that spoke — exactly the orphan we are sweeping for.
 		if err := garbageCollect(ctx, spokeRes, desired, p.log); err != nil {
-			return fmt.Errorf("garbage-collecting spoke %q: %w", target, err)
+			if authoritative {
+				return fmt.Errorf("garbage-collecting spoke %q: %w", target, err)
+			}
+			p.log.Debug("compositionmirror: sweep-only GC failed, skipping", "target", target, "error", err)
 		}
 	}
 
