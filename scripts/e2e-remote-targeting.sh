@@ -31,13 +31,18 @@ ADMIN_KUBECONFIG="$WORK/gke-admin.kubeconfig"
 cleanup() {
   echo "==> Cleanup"
   kind delete cluster --name "$KIND_NAME" >/dev/null 2>&1 || true
-  gcloud container clusters delete "$CLUSTER" --zone "$ZONE" --quiet >/dev/null 2>&1 || true
+  # KUBECONFIG override: gcloud clusters delete otherwise prunes the cluster's context from the
+  # caller's active ~/.kube/config. Keep it pinned to the throwaway admin kubeconfig.
+  KUBECONFIG="$ADMIN_KUBECONFIG" gcloud container clusters delete "$CLUSTER" --zone "$ZONE" --quiet >/dev/null 2>&1 || true
   rm -rf "$WORK"
 }
 trap cleanup EXIT
 
 echo "==> Creating GKE target cluster $CLUSTER ($ZONE) in the background"
-gcloud container clusters create "$CLUSTER" --zone "$ZONE" \
+# KUBECONFIG override is REQUIRED: gcloud clusters create implicitly runs get-credentials on
+# success, writing the new cluster into the caller's active ~/.kube/config and switching
+# current-context to it. Pin KUBECONFIG to the throwaway admin file so the real context is untouched.
+KUBECONFIG="$ADMIN_KUBECONFIG" gcloud container clusters create "$CLUSTER" --zone "$ZONE" \
   --num-nodes 1 --machine-type "$MACHINE" --disk-size 30 \
   --no-enable-autoupgrade --no-enable-autorepair --quiet &
 GKE_PID=$!
