@@ -12,6 +12,7 @@ import (
 	"github.com/go-logr/logr"
 
 	"github.com/krateoplatformops/core-provider/internal/controllers/compositiondefinitions"
+	"github.com/krateoplatformops/core-provider/internal/controllers/compositionmirror"
 	"github.com/krateoplatformops/core-provider/internal/controllers/kubernetestargets"
 	"github.com/krateoplatformops/core-provider/internal/controllers/remoteinstalls"
 	"github.com/krateoplatformops/core-provider/internal/tools/pluralizer"
@@ -208,6 +209,12 @@ func main() {
 		ControllerOptions: o,
 	}); err != nil {
 		log.Error(err, "Cannot setup RemoteInstall controller")
+		os.Exit(1)
+	}
+	if err := compositionmirror.Setup(mgr, compositionmirror.Options{
+		ControllerOptions: o,
+	}); err != nil {
+		log.Error(err, "Cannot setup composition mirror controller")
 		os.Exit(1)
 	}
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
