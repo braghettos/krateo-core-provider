@@ -87,9 +87,18 @@ func TestMain(m *testing.M) {
 		return ctx, err
 	}
 
+	// Cluster creation uses kind's default node image (what CI runs on). Local runs on Docker Desktop /
+	// Apple Silicon — where that default (currently kindest/node:v1.36.1) fails to boot with a systemd
+	// "Reached target Multi-User System" error — can override it via KIND_NODE_IMAGE, e.g.
+	// KIND_NODE_IMAGE=kindest/node:v1.32.2. CI leaves it unset and keeps the default.
+	createCluster := envfuncs.CreateCluster(kindCluster, clusterName)
+	if img := os.Getenv("KIND_NODE_IMAGE"); img != "" {
+		createCluster = envfuncs.CreateClusterWithOpts(kindCluster, clusterName, kind.WithImage(img))
+	}
+
 	testenv.Setup(
 		cleanAssetFolder,
-		envfuncs.CreateCluster(kindCluster, clusterName),
+		createCluster,
 		e2e.CreateNamespace(namespace),
 
 		func(ctx context.Context, cfg *envconf.Config) (context.Context, error) {
