@@ -123,9 +123,14 @@ func TestE2E_RemoteCompositionMirror(t *testing.T) {
 		t.Fatalf("creating spoke foreign: %v", err)
 	}
 
+	// Single-spoke reflection: the resolver returns the one spoke for any target, with the default
+	// target as its name (fan-out with one target is the pre-fan-out behavior).
 	params := reflectParams{
-		hub: hubDyn, spoke: spokeDyn, gvr: e2eGVR,
-		apiVersion: e2eAPIVersion, kind: e2eKind, namespace: e2eNamespace, log: log,
+		hub:           hubDyn,
+		resolveSpoke:  func(context.Context, string) (dynamic.Interface, error) { return spokeDyn, nil },
+		defaultTarget: "e2e-spoke",
+		gvr:           e2eGVR,
+		apiVersion:    e2eAPIVersion, kind: e2eKind, namespace: e2eNamespace, log: log,
 	}
 
 	// 3. First reflection pass: mirror down + GC.
