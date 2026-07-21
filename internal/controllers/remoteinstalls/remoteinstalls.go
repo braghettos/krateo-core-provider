@@ -1,8 +1,17 @@
-// Package remoteinstalls reconciles RemoteInstall objects (Phase 2). A RemoteInstall is the
-// one-object intent "install this chart on this spoke": the controller owns a remote-targeted
-// CompositionDefinition (chart + deploy.targetRef → the KubernetesTarget) and rolls its readiness,
-// plus the target's reachability, up into the RemoteInstall status. Deleting the RemoteInstall
-// garbage-collects the CompositionDefinition (owner ref), whose own Delete tears the spoke down.
+// Package remoteinstalls reconciles RemoteInstall objects. A RemoteInstall is the one-object intent
+// "install this chart on this spoke": the controller owns a remote-targeted CompositionDefinition
+// (chart + deploy.targetRef → the KubernetesTarget) and rolls its readiness, plus the target's
+// reachability, up into the RemoteInstall status. Deleting the RemoteInstall garbage-collects the
+// CompositionDefinition (owner ref), whose own Delete tears the spoke down.
+//
+// DEPRECATED. RemoteInstall is now a thin migration shim over the remote-composition-mirror model
+// (docs/design/remote-composition-mirror.md §6): a RemoteInstall{ targetRef, chart, values } is
+// exactly a CompositionDefinition{ chart, deploy.targetRef } plus a Composition{ spec: values }. Once
+// its owned CompositionDefinition is Ready, this controller no longer applies the composition
+// instance onto the spoke directly; instead it creates/updates a first-class hub Composition (owned
+// by the RemoteInstall, from spec.values), which the compositionmirror reflector then mirrors onto
+// the spoke and reads status back from. New usage should author a remote-targeted
+// CompositionDefinition + a Composition directly; the kind is scheduled for removal.
 package remoteinstalls
 
 import (
@@ -12,7 +21,6 @@ import (
 	"time"
 
 	compositiondefinitionsv1alpha1 "github.com/krateoplatformops/core-provider/apis/compositiondefinitions/v1alpha1"
-	"github.com/krateoplatformops/core-provider/internal/tools/clusterkube"
 	rtv1 "github.com/krateoplatformops/provider-runtime/apis/common/v1"
 	"github.com/krateoplatformops/provider-runtime/pkg/controller"
 	"github.com/krateoplatformops/provider-runtime/pkg/logging"
@@ -21,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -45,9 +54,10 @@ type Options struct {
 // they own.
 func Setup(mgr ctrl.Manager, o Options) error {
 	r := &Reconciler{
-		client: mgr.GetClient(),
-		scheme: mgr.GetScheme(),
-		log:    o.ControllerOptions.Logger.WithValues("controller", "remoteinstall"),
+		client:     mgr.GetClient(),
+		hubDynamic: dynamic.NewForConfigOrDie(mgr.GetConfig()),
+		scheme:     mgr.GetScheme(),
+		log:        o.ControllerOptions.Logger.WithValues("controller", "remoteinstall"),
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&compositiondefinitionsv1alpha1.RemoteInstall{}).
@@ -56,11 +66,15 @@ func Setup(mgr ctrl.Manager, o Options) error {
 		Complete(r)
 }
 
-// Reconciler owns a CompositionDefinition per RemoteInstall and mirrors its status.
+// Reconciler owns a CompositionDefinition per RemoteInstall and, once it is Ready, a first-class hub
+// Composition (from spec.values) that the compositionmirror reflector projects onto the spoke. It
+// rolls the CompositionDefinition status up into the RemoteInstall.
 type Reconciler struct {
 	client client.Client
-	scheme *runtime.Scheme
-	log    logging.Logger
+	// hubDynamic applies the hub Composition of the runtime-generated Kind (not in the typed scheme).
+	hubDynamic dynamic.Interface
+	scheme     *runtime.Scheme
+	log        logging.Logger
 }
 
 // Reconcile ensures the owned CompositionDefinition matches the RemoteInstall intent and rolls its
@@ -99,10 +113,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 	ready := cd.Status.GetCondition(rtv1.TypeReady)
 	switch ready.Status {
 	case metav1.ConditionTrue:
-		// The CompositionDefinition is Ready: the generated CRD + cdc are on the spoke. Apply the
-		// composition instance there from spec.values to complete the install.
-		if err := r.applyInstance(ctx, ri, cd); err != nil {
-			return r.fail(ctx, ri, fmt.Sprintf("applying composition instance on target: %v", err))
+		// The CompositionDefinition is Ready: the generated CRD exists on both the hub (increment 1)
+		// and the spoke, and the cdc is on the spoke. Author the desired Composition on the hub from
+		// spec.values; the compositionmirror reflector mirrors it onto the spoke and reads status back.
+		if err := r.applyHubComposition(ctx, ri, cd); err != nil {
+			return r.fail(ctx, ri, fmt.Sprintf("authoring hub composition: %v", err))
 		}
 		ri.Status.Phase = phaseReady
 		ri.Status.SetConditions(rtv1.Available())
@@ -119,12 +134,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 	return reconcile.Result{RequeueAfter: requeueInterval}, nil
 }
 
-// applyInstance creates or updates the composition instance on the spoke from spec.values. The
+// applyHubComposition creates or updates the desired Composition on the hub from spec.values. The
 // generated GVK comes from the CompositionDefinition status (apiVersion/kind/resource, recorded once
-// the CRD is generated); the instance is named/namespaced like the RemoteInstall. Cleanup is handled
-// by the CompositionDefinition's own Delete (the RemoteInstall owns the CD), which removes the
-// generated CRD and cascades its instances — so no finalizer is needed here.
-func (r *Reconciler) applyInstance(ctx context.Context, ri *compositiondefinitionsv1alpha1.RemoteInstall, cd *compositiondefinitionsv1alpha1.CompositionDefinition) error {
+// the CRD is generated); the Composition is named/namespaced like the RemoteInstall and is owned by
+// it, so it is garbage-collected when the RemoteInstall is deleted. The compositionmirror reflector
+// then mirrors this hub Composition onto the spoke and reads its status back — the RemoteInstall no
+// longer touches the spoke directly (docs/design/remote-composition-mirror.md §6).
+func (r *Reconciler) applyHubComposition(ctx context.Context, ri *compositiondefinitionsv1alpha1.RemoteInstall, cd *compositiondefinitionsv1alpha1.CompositionDefinition) error {
 	if cd.Status.ApiVersion == "" || cd.Status.Kind == "" || cd.Status.Resource == "" {
 		return fmt.Errorf("CompositionDefinition status has no generated GVK yet")
 	}
@@ -141,44 +157,38 @@ func (r *Reconciler) applyInstance(ctx context.Context, ri *compositiondefinitio
 		}
 	}
 
-	// Build clients for the spoke (same path the CompositionDefinition reconcile uses). The
-	// KubernetesTarget is namespaced and resolved in the RemoteInstall's own namespace.
-	dt := &compositiondefinitionsv1alpha1.DeploymentTarget{
-		TargetRef: &compositiondefinitionsv1alpha1.TargetReference{Name: ri.Spec.TargetRef.Name},
-	}
-	clients, err := clusterkube.Remote(ctx, r.client, ri.Namespace, dt)
-	if err != nil {
-		return fmt.Errorf("building target clients: %w", err)
-	}
-	res := clients.Dynamic.Resource(gvr).Namespace(ri.Namespace)
+	res := r.hubDynamic.Resource(gvr).Namespace(ri.Namespace)
 
 	live, err := res.Get(ctx, ri.Name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
-		inst := &unstructured.Unstructured{}
-		inst.SetAPIVersion(cd.Status.ApiVersion)
-		inst.SetKind(cd.Status.Kind)
-		inst.SetNamespace(ri.Namespace)
-		inst.SetName(ri.Name)
+		comp := &unstructured.Unstructured{}
+		comp.SetAPIVersion(cd.Status.ApiVersion)
+		comp.SetKind(cd.Status.Kind)
+		comp.SetNamespace(ri.Namespace)
+		comp.SetName(ri.Name)
 		if spec != nil {
-			if err := unstructured.SetNestedMap(inst.Object, spec, "spec"); err != nil {
-				return fmt.Errorf("setting instance spec: %w", err)
+			if err := unstructured.SetNestedMap(comp.Object, spec, "spec"); err != nil {
+				return fmt.Errorf("setting composition spec: %w", err)
 			}
 		}
-		if _, err := res.Create(ctx, inst, metav1.CreateOptions{}); err != nil {
-			return fmt.Errorf("creating composition instance: %w", err)
+		if err := controllerutil.SetControllerReference(ri, comp, r.scheme); err != nil {
+			return fmt.Errorf("setting owner reference: %w", err)
+		}
+		if _, err := res.Create(ctx, comp, metav1.CreateOptions{}); err != nil {
+			return fmt.Errorf("creating hub composition: %w", err)
 		}
 		return nil
 	} else if err != nil {
-		return fmt.Errorf("reading composition instance: %w", err)
+		return fmt.Errorf("reading hub composition: %w", err)
 	}
 
-	// Update the desired spec, preserving anything the spoke controller set elsewhere.
+	// Update the desired spec (the reflector pushes it to the spoke; hub is the source of truth).
 	if spec != nil {
 		if err := unstructured.SetNestedMap(live.Object, spec, "spec"); err != nil {
-			return fmt.Errorf("updating instance spec: %w", err)
+			return fmt.Errorf("updating composition spec: %w", err)
 		}
 		if _, err := res.Update(ctx, live, metav1.UpdateOptions{}); err != nil {
-			return fmt.Errorf("updating composition instance: %w", err)
+			return fmt.Errorf("updating hub composition: %w", err)
 		}
 	}
 	return nil

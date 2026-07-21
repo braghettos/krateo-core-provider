@@ -21,6 +21,7 @@ import (
 	contexttools "github.com/krateoplatformops/core-provider/internal/tools/context"
 	crdclient "github.com/krateoplatformops/core-provider/internal/tools/crd"
 	crdutils "github.com/krateoplatformops/core-provider/internal/tools/crd/generation"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
 	"github.com/krateoplatformops/core-provider/internal/tools/deploy"
@@ -302,9 +303,9 @@ func cleanupObsoleteFinalizerLabels(ctx context.Context, kube client.Client, log
 }
 
 type connector struct {
-	dynamic    dynamic.Interface
-	client     kubernetes.Interface
-	kube       client.Client
+	dynamic dynamic.Interface
+	client  kubernetes.Interface
+	kube    client.Client
 	// apiReader reads directly from the API server (bypassing the controller-runtime cache) so
 	// Observe can re-read the CompositionDefinition fresh — see external.apiReader / D3.
 	apiReader  client.Reader
@@ -322,14 +323,15 @@ func (c *connector) Connect(ctx context.Context, mg resource.Managed) (reconcile
 	log := c.log.WithValues("name", cr.Name, "namespace", cr.Namespace)
 
 	ext := &external{
-		mgmt:       c.kube,
-		apiReader:  c.apiReader,
-		kube:       c.kube,
-		dynamic:    c.dynamic,
-		client:     c.client,
-		log:        log,
-		rec:        c.recorder,
-		pluralizer: c.pluralizer,
+		mgmt:        c.kube,
+		mgmtDynamic: c.dynamic,
+		apiReader:   c.apiReader,
+		kube:        c.kube,
+		dynamic:     c.dynamic,
+		client:      c.client,
+		log:         log,
+		rec:         c.recorder,
+		pluralizer:  c.pluralizer,
 	}
 
 	// When the CompositionDefinition targets a remote cluster, the generated CRD, its
@@ -358,6 +360,12 @@ type external struct {
 	// mgmt is the management-cluster client: it holds the CompositionDefinition
 	// resource, the chart/credentials secrets, and is where status is persisted.
 	mgmt client.Client
+	// mgmtDynamic is the hub (management-cluster) dynamic client. Unlike dynamic (below), which
+	// Connect swaps to the spoke for a remote CD, mgmtDynamic always points at the hub. It lets the
+	// remote branch apply the generated composition CRD onto the hub as well as the spoke, so the
+	// desired Composition can be authored/validated on the hub
+	// (docs/design/remote-composition-mirror.md).
+	mgmtDynamic dynamic.Interface
 	// apiReader reads the CompositionDefinition straight from the API server, bypassing the
 	// controller-runtime cache. Observe re-reads the CR through it so a lagging informer cache
 	// cannot make the engine reconcile a stale spec.chart.version (D3).
@@ -867,6 +875,25 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 	}, nil
 }
 
+// applyHubCompositionCRD ensures the generated composition CRD also exists on the hub (mgmt) for a
+// remote CompositionDefinition, so the desired Composition can be authored and validated on the hub
+// — the hub-side reflector then mirrors it onto the spoke. For a local CD the CRD already lives on
+// the provisioning cluster (which is the hub), so this is a no-op.
+//
+// A copy of crd is applied so the hub apply never mutates the caller's object; the hub's own
+// ApplyOrUpdateCRD adds the composition-version printer column and waits for the CRD to become
+// established, independently of the spoke apply. Cross-cluster CRD-version skew (hub vs spoke) is
+// tracked in docs/design/remote-composition-mirror.md §7.
+func (e *external) applyHubCompositionCRD(ctx context.Context, crd *apiextensionsv1.CustomResourceDefinition) error {
+	if !e.remote {
+		return nil
+	}
+	if _, err := crdclient.ApplyOrUpdateCRD(ctx, e.mgmt, e.mgmtDynamic, crd.DeepCopy()); err != nil {
+		return fmt.Errorf("error applying composition CRD to hub: %w", err)
+	}
+	return nil
+}
+
 func (e *external) Create(ctx context.Context, mg resource.Managed) error {
 	cr, ok := mg.(*compositiondefinitionsv1alpha1.CompositionDefinition)
 	if !ok {
@@ -906,6 +933,12 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) error {
 	gvr, err := crdclient.ApplyOrUpdateCRD(ctx, e.kube, e.dynamic, crd)
 	if err != nil {
 		return fmt.Errorf("error applying or updating CRD: %w", err)
+	}
+
+	// For a remote CD the composition CRD must also exist on the hub, so the desired Composition can
+	// be authored/validated there (it lives only on the spoke otherwise). No-op for local CDs.
+	if err := e.applyHubCompositionCRD(ctx, crd); err != nil {
+		return err
 	}
 
 	if err := e.ensureCompositionVersionPolicy(ctx); err != nil {
@@ -1080,6 +1113,12 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 	gvr, err := crdclient.ApplyOrUpdateCRD(ctx, e.kube, e.dynamic, crd)
 	if err != nil {
 		return fmt.Errorf("error applying or updating CRD: %w", err)
+	}
+
+	// For a remote CD the composition CRD must also exist on the hub, so the desired Composition can
+	// be authored/validated there (it lives only on the spoke otherwise). No-op for local CDs.
+	if err := e.applyHubCompositionCRD(ctx, crd); err != nil {
+		return err
 	}
 
 	if err := e.ensureCompositionVersionPolicy(ctx); err != nil {
@@ -1358,6 +1397,12 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
 		// the extra controllers.
 		for _, vi := range cr.Status.Managed.VersionInfo {
 			if vi.Version == gvr.Version {
+				continue
+			}
+			// The vacuum storage placeholder (and any version never realized as the current chart) has
+			// no Chart recorded and thus no controller to retire; Undeploy would dereference the nil
+			// Spec (deploy.go) and panic. Only versions that were once served have a Chart.
+			if vi.Chart == nil {
 				continue
 			}
 			oldVerGVR := schema.GroupVersionResource{Group: gvr.Group, Version: vi.Version, Resource: gvr.Resource}
