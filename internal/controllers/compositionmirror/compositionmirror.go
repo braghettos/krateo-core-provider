@@ -19,6 +19,8 @@ package compositionmirror
 import (
 	"context"
 	"fmt"
+	"reflect"
+	"sync"
 	"time"
 
 	compositiondefinitionsv1alpha1 "github.com/krateoplatformops/core-provider/apis/compositiondefinitions/v1alpha1"
@@ -31,8 +33,13 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	crcontroller "sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 )
 
 const (
@@ -58,26 +65,41 @@ type Options struct {
 	ControllerOptions controller.Options
 }
 
-// Setup wires the reflector into the manager. It watches CompositionDefinitions (a statically-typed
-// Kind); the generated composition Kinds are reconciled by enumeration inside Reconcile.
+// Setup wires the reflector into the manager. It watches CompositionDefinitions statically; each
+// generated composition Kind is watched dynamically the first time its CD reconciles (the Kind is
+// created at runtime), so a hub Composition edit reflects immediately instead of at the next resync.
 func Setup(mgr ctrl.Manager, o Options) error {
 	r := &Reconciler{
 		hub:        mgr.GetClient(),
 		hubDynamic: dynamic.NewForConfigOrDie(mgr.GetConfig()),
+		cache:      mgr.GetCache(),
+		watched:    map[schema.GroupVersionKind]struct{}{},
 		log:        o.ControllerOptions.Logger.WithValues("controller", "compositionmirror"),
 	}
-	return ctrl.NewControllerManagedBy(mgr).
+	c, err := ctrl.NewControllerManagedBy(mgr).
 		Named("compositionmirror").
 		WithOptions(o.ControllerOptions.ForControllerRuntime()).
 		For(&compositiondefinitionsv1alpha1.CompositionDefinition{}).
-		Complete(r)
+		Build(r)
+	if err != nil {
+		return err
+	}
+	r.ctrl = c
+	return nil
 }
 
 // Reconciler mirrors the hub Composition instances of a remote CompositionDefinition onto its spoke.
 type Reconciler struct {
 	hub        client.Client
 	hubDynamic dynamic.Interface
-	log        logging.Logger
+	// cache and ctrl back the dynamic per-Kind watches. Because composition Kinds are generated at
+	// runtime, the reflector registers a watch for each Kind the first time it reconciles that Kind's
+	// CompositionDefinition (see ensureWatch); watched dedupes registration.
+	cache   cache.Cache
+	ctrl    crcontroller.Controller
+	mu      sync.Mutex
+	watched map[schema.GroupVersionKind]struct{}
+	log     logging.Logger
 }
 
 // Reconcile enumerates and reflects the hub Composition instances of one remote CompositionDefinition.
@@ -104,6 +126,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 		return reconcile.Result{RequeueAfter: requeueInterval}, nil
 	}
 	gvr := gv.WithResource(cd.Status.Resource)
+
+	// React to hub Composition changes immediately by watching this generated Kind. Best-effort: if
+	// the Kind is not discoverable yet (its CRD was just created), the periodic resync still drives
+	// reflection and the next reconcile retries the registration.
+	r.ensureWatch(gv.WithKind(cd.Status.Kind))
 
 	// Bound all spoke-reaching work: an unreachable target fails this reconcile instead of blocking a
 	// worker until the client's own (possibly absent) timeouts fire — isolating one bad spoke from the
@@ -132,6 +159,63 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 	}
 
 	return reconcile.Result{RequeueAfter: requeueInterval}, nil
+}
+
+// ensureWatch registers a dynamic informer-backed watch on the given generated composition Kind the
+// first time it is seen, so hub Composition edits enqueue their CompositionDefinition and reflect at
+// once rather than at resync latency. Registration is best-effort and deduped per GVK: a Kind that is
+// not yet discoverable simply isn't watched this pass and is retried on the next reconcile.
+//
+// Note (v1): watches are not torn down when a CD is deleted — controller-runtime has no clean
+// per-source stop. A lingering watch on a since-removed Kind is harmless (its informer errors and idles),
+// and the hub composition CRD outlives the CD today anyway. Watch teardown is tracked in the design's
+// open items.
+func (r *Reconciler) ensureWatch(gvk schema.GroupVersionKind) {
+	if r.ctrl == nil {
+		return // not wired for dynamic watches (e.g. under unit tests); resync still reflects
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.watched[gvk]; ok {
+		return
+	}
+	obj := &unstructured.Unstructured{}
+	obj.SetGroupVersionKind(gvk)
+	var co client.Object = obj
+	// GenerationChangedPredicate reconciles on spec changes, creates and deletes, but NOT on
+	// status-only / metadata updates. That is essential: the reflector writes the spoke status back
+	// onto the hub Composition, and reconciling on that write would loop. (Status updates leave
+	// metadata.generation unchanged because the composition CRD has a status subresource.)
+	src := source.Kind(r.cache, co,
+		handler.EnqueueRequestsFromMapFunc(enqueueCDForComposition(r.hub)),
+		predicate.GenerationChangedPredicate{})
+	if err := r.ctrl.Watch(src); err != nil {
+		r.log.Debug("compositionmirror: dynamic watch registration deferred", "gvk", gvk.String(), "error", err)
+		return
+	}
+	r.watched[gvk] = struct{}{}
+	r.log.Debug("compositionmirror: registered dynamic watch on hub Kind", "gvk", gvk.String())
+}
+
+// enqueueCDForComposition maps a hub Composition event to the reconcile of its owning
+// CompositionDefinition — the remote-targeted CD in the same namespace whose generated Kind matches
+// the Composition's. (Local CDs do not reflect, so they are skipped.)
+func enqueueCDForComposition(hub client.Client) handler.MapFunc {
+	return func(ctx context.Context, obj client.Object) []reconcile.Request {
+		var cds compositiondefinitionsv1alpha1.CompositionDefinitionList
+		if err := hub.List(ctx, &cds, client.InNamespace(obj.GetNamespace())); err != nil {
+			return nil
+		}
+		kind := obj.GetObjectKind().GroupVersionKind().Kind
+		var reqs []reconcile.Request
+		for i := range cds.Items {
+			cd := &cds.Items[i]
+			if clusterkube.IsRemote(cd.Spec.Deploy) && cd.Status.Kind == kind {
+				reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(cd)})
+			}
+		}
+		return reqs
+	}
 }
 
 // reflectParams carries everything reflectInstances needs. Hub and spoke are passed as dynamic
@@ -241,6 +325,12 @@ func mirrorStatusUp(ctx context.Context, hubRes, spokeRes dynamic.ResourceInterf
 	cur, err := hubRes.Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
 		return fmt.Errorf("re-reading hub composition: %w", err)
+	}
+	// Skip the write when the hub status already equals the spoke's. Besides avoiding a needless write
+	// every resync, this is a second guard against a watch loop: an unconditional UpdateStatus bumps
+	// the hub Composition's resourceVersion, which would re-fire the watch even if nothing changed.
+	if curStatus, _, _ := unstructured.NestedMap(cur.Object, "status"); reflect.DeepEqual(curStatus, status) {
+		return nil
 	}
 	if err := unstructured.SetNestedMap(cur.Object, status, "status"); err != nil {
 		return fmt.Errorf("setting hub status: %w", err)
