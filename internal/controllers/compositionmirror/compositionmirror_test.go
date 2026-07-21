@@ -13,6 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	clienttesting "k8s.io/client-go/testing"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -191,5 +192,73 @@ func TestReconcile_UnreachableSpokeSurfacesError(t *testing.T) {
 	_, err := r.Reconcile(context.Background(), reconcileReq("remote-cd", "krateo-system"))
 	if err == nil {
 		t.Fatal("expected reconcile to return an error for an unreachable spoke (backoff), got nil")
+	}
+}
+
+// A hub Composition event maps only to the remote-targeted CompositionDefinition of the SAME Kind in
+// the SAME namespace — never a local CD (which doesn't reflect), a different Kind, or another namespace.
+func TestEnqueueCDForComposition(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := compositiondefinitionsv1alpha1.SchemeBuilder.AddToScheme(scheme); err != nil {
+		t.Fatalf("add scheme: %v", err)
+	}
+
+	remote := remoteCD("portal-cd", "krateo-system", "spoke")
+	remote.Status.Kind = "Portal"
+	local := remoteCD("portal-local", "krateo-system", "") // local, same Kind -> excluded (no reflection)
+	local.Status.Kind = "Portal"
+	otherKind := remoteCD("db-cd", "krateo-system", "spoke")
+	otherKind.Status.Kind = "Database" // different Kind -> excluded
+	otherNS := remoteCD("portal-elsewhere", "team-b", "spoke")
+	otherNS.Status.Kind = "Portal" // different namespace -> excluded
+
+	hub := fakeclient.NewClientBuilder().WithScheme(scheme).
+		WithObjects(remote, local, otherKind, otherNS).Build()
+
+	comp := &unstructured.Unstructured{}
+	comp.SetGroupVersionKind(schema.GroupVersionKind{Group: "composition.krateo.io", Version: "v1-0-0", Kind: "Portal"})
+	comp.SetNamespace("krateo-system")
+	comp.SetName("my-portal")
+
+	reqs := enqueueCDForComposition(hub)(context.Background(), comp)
+	if len(reqs) != 1 {
+		t.Fatalf("expected exactly one enqueued CD, got %d: %v", len(reqs), reqs)
+	}
+	if reqs[0].Name != "portal-cd" || reqs[0].Namespace != "krateo-system" {
+		t.Fatalf("expected krateo-system/portal-cd, got %v", reqs[0].NamespacedName)
+	}
+}
+
+// mirrorStatusUp must NOT write when the hub status already equals the spoke's. An unconditional
+// UpdateStatus would bump the hub Composition's resourceVersion and re-fire the dynamic watch, looping
+// forever. Here hub and spoke already agree, so zero status writes must occur.
+func TestReflectInstances_StatusIdempotent(t *testing.T) {
+	ctx := context.Background()
+	ready := map[string]interface{}{"phase": "ready"}
+
+	hubA := portal("portal-a", map[string]interface{}{"tenant": "acme"}, false)
+	_ = unstructured.SetNestedMap(hubA.Object, ready, "status")
+	hub := newFakeDyn(hubA)
+
+	spokeA := portal("portal-a", map[string]interface{}{"tenant": "acme"}, true)
+	_ = unstructured.SetNestedMap(spokeA.Object, ready, "status")
+	spoke := newFakeDyn(spokeA)
+
+	var statusWrites int
+	hub.PrependReactor("update", "portals", func(a clienttesting.Action) (bool, runtime.Object, error) {
+		if a.GetSubresource() == "status" {
+			statusWrites++
+		}
+		return false, nil, nil
+	})
+
+	if err := reflectInstances(ctx, reflectParams{
+		hub: hub, spoke: spoke, gvr: testGVR,
+		apiVersion: testAPIVersion, kind: testKind, namespace: testNamespace, log: logging.NewNopLogger(),
+	}); err != nil {
+		t.Fatalf("reflectInstances: %v", err)
+	}
+	if statusWrites != 0 {
+		t.Errorf("expected 0 hub status writes when status is unchanged, got %d — would loop the dynamic watch", statusWrites)
 	}
 }
