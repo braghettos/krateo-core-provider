@@ -58,7 +58,11 @@ GKE_PID=$!
 
 echo "==> Creating kind management/hub cluster $KIND_NAME"
 kind delete cluster --name "$KIND_NAME" --kubeconfig "$MGMT_KUBECONFIG" >/dev/null 2>&1 || true
-kind create cluster --name "$KIND_NAME" --kubeconfig "$MGMT_KUBECONFIG"
+# KIND_NODE_IMAGE lets a host whose Docker rejects kind's default node image pin a working one
+# (e.g. Docker Desktop / Apple Silicon: KIND_NODE_IMAGE=kindest/node:v1.32.2). CI leaves it unset.
+KIND_IMAGE_FLAG=()
+[ -n "${KIND_NODE_IMAGE:-}" ] && KIND_IMAGE_FLAG=(--image "$KIND_NODE_IMAGE")
+kind create cluster --name "$KIND_NAME" --kubeconfig "$MGMT_KUBECONFIG" "${KIND_IMAGE_FLAG[@]}"
 
 echo "==> Waiting for GKE creation to finish"
 wait "$GKE_PID"
