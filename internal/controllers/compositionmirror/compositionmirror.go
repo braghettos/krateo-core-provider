@@ -46,8 +46,11 @@ const (
 	// hub Kind (v1), drift on a hub Composition is healed at most this long after it happens.
 	requeueInterval = 30 * time.Second
 	// requeuePending is the shorter backoff used while the CompositionDefinition has not yet recorded
-	// its generated GVK (the CRD is still being generated) or a transient client error occurred.
+	// its generated GVK (the CRD is still being generated).
 	requeuePending = 10 * time.Second
+	// reconcileTimeout bounds the spoke-reaching work of a single reconcile so a slow or unreachable
+	// target cannot pin a worker indefinitely and starve reflection for other CompositionDefinitions.
+	reconcileTimeout = 2 * time.Minute
 )
 
 // Options configures the compositionmirror reconciler.
@@ -102,11 +105,18 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 	}
 	gvr := gv.WithResource(cd.Status.Resource)
 
+	// Bound all spoke-reaching work: an unreachable target fails this reconcile instead of blocking a
+	// worker until the client's own (possibly absent) timeouts fire — isolating one bad spoke from the
+	// rest. Spoke failures are returned as errors so controller-runtime applies rate-limited backoff
+	// (a persistently down spoke stops being retried at the flat resync interval and is surfaced),
+	// while the happy path keeps the fixed resync cadence that drives drift healing.
+	ctx, cancel := context.WithTimeout(ctx, reconcileTimeout)
+	defer cancel()
+
 	// The KubernetesTarget is namespaced and resolved in the CompositionDefinition's own namespace.
 	spoke, err := clusterkube.Remote(ctx, r.hub, cd.Namespace, cd.Spec.Deploy)
 	if err != nil {
-		r.log.Debug("compositionmirror: building spoke clients", "cd", req.String(), "error", err)
-		return reconcile.Result{RequeueAfter: requeueInterval}, nil
+		return reconcile.Result{}, fmt.Errorf("compositionmirror: building spoke clients for %s: %w", req, err)
 	}
 
 	if err := reflectInstances(ctx, reflectParams{
@@ -118,8 +128,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 		namespace:  cd.Namespace,
 		log:        r.log,
 	}); err != nil {
-		r.log.Debug("compositionmirror: reflecting instances", "cd", req.String(), "error", err)
-		return reconcile.Result{RequeueAfter: requeueInterval}, nil
+		return reconcile.Result{}, fmt.Errorf("compositionmirror: reflecting %s: %w", req, err)
 	}
 
 	return reconcile.Result{RequeueAfter: requeueInterval}, nil
