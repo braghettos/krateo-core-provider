@@ -102,7 +102,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reco
 	}
 	gvr := gv.WithResource(cd.Status.Resource)
 
-	spoke, err := clusterkube.Remote(ctx, r.hub, cd.Spec.Deploy)
+	// The KubernetesTarget is namespaced and resolved in the CompositionDefinition's own namespace.
+	spoke, err := clusterkube.Remote(ctx, r.hub, cd.Namespace, cd.Spec.Deploy)
 	if err != nil {
 		r.log.Debug("compositionmirror: building spoke clients", "cd", req.String(), "error", err)
 		return reconcile.Result{RequeueAfter: requeueInterval}, nil
