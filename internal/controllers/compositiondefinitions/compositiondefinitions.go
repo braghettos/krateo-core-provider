@@ -1399,6 +1399,12 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
 			if vi.Version == gvr.Version {
 				continue
 			}
+			// The vacuum storage placeholder (and any version never realized as the current chart) has
+			// no Chart recorded and thus no controller to retire; Undeploy would dereference the nil
+			// Spec (deploy.go) and panic. Only versions that were once served have a Chart.
+			if vi.Chart == nil {
+				continue
+			}
 			oldVerGVR := schema.GroupVersionResource{Group: gvr.Group, Version: vi.Version, Resource: gvr.Resource}
 			if uerr := deploy.Undeploy(ctx, e.kube, deploy.UndeployOptions{
 				DiscoveryClient:        memory.NewMemCacheClient(e.client.Discovery()),

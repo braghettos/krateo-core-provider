@@ -372,7 +372,7 @@ func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 	}
 
 	hsh := hasher.NewFNVObjectHash()
-	if opts.Spec.Credentials != nil {
+	if opts.Spec != nil && opts.Spec.Credentials != nil {
 		role := rbacv1.Role{}
 		err = objects.CreateK8sObject(&role,
 			opts.GVR,
@@ -707,7 +707,7 @@ func Undeploy(ctx context.Context, kube client.Client, opts UndeployOptions) err
 		log.Debug("Service successfully uninstalled", "gvr", opts.GVR.String(), "name", svc.Name, "namespace", svc.Namespace)
 	}
 
-	if opts.Spec.Credentials != nil {
+	if opts.Spec != nil && opts.Spec.Credentials != nil {
 		role := rbacv1.Role{}
 		err = objects.CreateK8sObject(&role, opts.GVR, getCDCrbacNN(types.NamespacedName{Namespace: opts.Spec.Credentials.PasswordRef.Namespace, Name: namespacedName.Name}), filepath.Join(opts.RBACFolderPath, "secret-role.yaml"), "secretName", opts.Spec.Credentials.PasswordRef.Name)
 		if err != nil {
@@ -767,7 +767,7 @@ func Lookup(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 	}
 
 	hsh := hasher.NewFNVObjectHash()
-	if opts.Spec.Credentials != nil {
+	if opts.Spec != nil && opts.Spec.Credentials != nil {
 		role := rbacv1.Role{}
 		err = objects.CreateK8sObject(&role, opts.GVR, getCDCrbacNN(types.NamespacedName{Namespace: opts.Spec.Credentials.PasswordRef.Namespace, Name: namespacedName.Name}), filepath.Join(opts.RBACFolderPath, "secret-role.yaml"), "secretName", opts.Spec.Credentials.PasswordRef.Name)
 		if err != nil {
