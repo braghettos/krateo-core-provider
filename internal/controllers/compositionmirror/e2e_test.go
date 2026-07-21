@@ -19,10 +19,14 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
+	compositiondefinitionsv1alpha1 "github.com/krateoplatformops/core-provider/apis/compositiondefinitions/v1alpha1"
+	rtv1 "github.com/krateoplatformops/provider-runtime/apis/common/v1"
 	"github.com/krateoplatformops/provider-runtime/pkg/logging"
+	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -34,6 +38,8 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 const (
@@ -173,9 +179,13 @@ func TestE2E_RemoteCompositionMirror(t *testing.T) {
 }
 
 func e2ePortal(name string, spec map[string]interface{}, managed bool) *unstructured.Unstructured {
+	return e2ePortalIn(e2eAPIVersion, e2eKind, name, spec, managed)
+}
+
+func e2ePortalIn(apiVersion, kind, name string, spec map[string]interface{}, managed bool) *unstructured.Unstructured {
 	u := &unstructured.Unstructured{}
-	u.SetAPIVersion(e2eAPIVersion)
-	u.SetKind(e2eKind)
+	u.SetAPIVersion(apiVersion)
+	u.SetKind(kind)
 	u.SetNamespace(e2eNamespace)
 	u.SetName(name)
 	if spec != nil {
@@ -187,9 +197,14 @@ func e2ePortal(name string, spec map[string]interface{}, managed bool) *unstruct
 	return u
 }
 
-// compositionCRD builds a namespaced Portal CRD with a status subresource (so status readback via
-// UpdateStatus works on a real apiserver) and open spec/status schemas.
+// compositionCRD builds the default Portal composition CRD.
 func compositionCRD() *apiextensionsv1.CustomResourceDefinition {
+	return compositionCRDNamed(e2eGroup, e2eVersion, e2ePlural, e2eKind)
+}
+
+// compositionCRDNamed builds a namespaced composition CRD for the given identity, with a status
+// subresource (so status readback via UpdateStatus works on a real apiserver) and open schemas.
+func compositionCRDNamed(group, version, plural, kind string) *apiextensionsv1.CustomResourceDefinition {
 	preserve := true
 	schema := apiextensionsv1.CustomResourceValidation{
 		OpenAPIV3Schema: &apiextensionsv1.JSONSchemaProps{
@@ -202,15 +217,15 @@ func compositionCRD() *apiextensionsv1.CustomResourceDefinition {
 	}
 	return &apiextensionsv1.CustomResourceDefinition{
 		TypeMeta:   metav1.TypeMeta{APIVersion: "apiextensions.k8s.io/v1", Kind: "CustomResourceDefinition"},
-		ObjectMeta: metav1.ObjectMeta{Name: e2ePlural + "." + e2eGroup},
+		ObjectMeta: metav1.ObjectMeta{Name: plural + "." + group},
 		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
-			Group: e2eGroup,
+			Group: group,
 			Names: apiextensionsv1.CustomResourceDefinitionNames{
-				Plural: e2ePlural, Singular: "portal", Kind: e2eKind, ListKind: e2eKind + "List",
+				Plural: plural, Singular: strings.ToLower(kind), Kind: kind, ListKind: kind + "List",
 			},
 			Scope: apiextensionsv1.NamespaceScoped,
 			Versions: []apiextensionsv1.CustomResourceDefinitionVersion{{
-				Name: e2eVersion, Served: true, Storage: true, Schema: &schema,
+				Name: version, Served: true, Storage: true, Schema: &schema,
 				Subresources: &apiextensionsv1.CustomResourceSubresources{Status: &apiextensionsv1.CustomResourceSubresourceStatus{}},
 			}},
 		},
@@ -231,4 +246,191 @@ func waitEstablished(ctx context.Context, cl client.Client, name string, timeout
 		time.Sleep(2 * time.Second)
 	}
 	return fmt.Errorf("timed out waiting for %s to be established", name)
+}
+
+// coreHubClient is a typed client for the hub that also knows the core.krateo.io kinds
+// (CompositionDefinition, KubernetesTarget) the reflector's teardown path resolves.
+func coreHubClient(t *testing.T) client.Client {
+	t.Helper()
+	rc, err := clientcmd.BuildConfigFromFlags("", os.Getenv("MGMT_KUBECONFIG"))
+	if err != nil {
+		t.Fatalf("building hub rest config: %v", err)
+	}
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = apiextensionsv1.AddToScheme(scheme)
+	_ = compositiondefinitionsv1alpha1.SchemeBuilder.AddToScheme(scheme)
+	cl, err := client.New(rc, client.Options{Scheme: scheme})
+	if err != nil {
+		t.Fatalf("building core hub client: %v", err)
+	}
+	return cl
+}
+
+// coreCRD builds a minimal (open-schema) core.krateo.io CRD so the typed CompositionDefinition /
+// KubernetesTarget objects the reflector reads can exist on the hub. CompositionDefinition needs a
+// status subresource (the test records the generated GVK on status).
+func coreCRD(plural, kind string, withStatus bool) *apiextensionsv1.CustomResourceDefinition {
+	preserve := true
+	props := map[string]apiextensionsv1.JSONSchemaProps{
+		"spec": {Type: "object", XPreserveUnknownFields: &preserve},
+	}
+	ver := apiextensionsv1.CustomResourceDefinitionVersion{Name: "v1alpha1", Served: true, Storage: true}
+	if withStatus {
+		props["status"] = apiextensionsv1.JSONSchemaProps{Type: "object", XPreserveUnknownFields: &preserve}
+		ver.Subresources = &apiextensionsv1.CustomResourceSubresources{Status: &apiextensionsv1.CustomResourceSubresourceStatus{}}
+	}
+	ver.Schema = &apiextensionsv1.CustomResourceValidation{OpenAPIV3Schema: &apiextensionsv1.JSONSchemaProps{Type: "object", Properties: props}}
+	return &apiextensionsv1.CustomResourceDefinition{
+		TypeMeta:   metav1.TypeMeta{APIVersion: "apiextensions.k8s.io/v1", Kind: "CustomResourceDefinition"},
+		ObjectMeta: metav1.ObjectMeta{Name: plural + ".core.krateo.io"},
+		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+			Group: "core.krateo.io",
+			Names: apiextensionsv1.CustomResourceDefinitionNames{
+				Plural: plural, Singular: strings.ToLower(kind), Kind: kind, ListKind: kind + "List",
+			},
+			Scope:    apiextensionsv1.NamespaceScoped,
+			Versions: []apiextensionsv1.CustomResourceDefinitionVersion{ver},
+		},
+	}
+}
+
+func applyAndWaitCRD(ctx context.Context, t *testing.T, cl client.Client, crd *apiextensionsv1.CustomResourceDefinition) {
+	t.Helper()
+	if err := cl.Create(ctx, crd); err != nil && !apierrors.IsAlreadyExists(err) {
+		t.Fatalf("creating CRD %s: %v", crd.Name, err)
+	}
+	if err := waitEstablished(ctx, cl, crd.Name, 120*time.Second); err != nil {
+		t.Fatalf("CRD %s not established: %v", crd.Name, err)
+	}
+	t.Cleanup(func() {
+		c := &apiextensionsv1.CustomResourceDefinition{}
+		c.Name = crd.Name
+		_ = cl.Delete(context.Background(), c)
+	})
+}
+
+// TestE2E_RemoteCompositionMirrorTeardown validates the CD-finalizer teardown (PR #53) against real
+// clusters by driving the actual Reconcile: a live remote CompositionDefinition gains the finalizer
+// and mirrors its hub Composition to the spoke; deleting the CD then removes BOTH the hub Composition
+// and its spoke mirror and releases the finalizer so the CD completes deletion. This exercises the
+// real reconcileDelete orchestration (finalizer + clusterkube.Remote from the CD + cross-cluster
+// delete), which fakes cannot.
+func TestE2E_RemoteCompositionMirrorTeardown(t *testing.T) {
+	if os.Getenv("MGMT_KUBECONFIG") == "" || os.Getenv("TARGET_KUBECONFIG") == "" {
+		t.Skip("MGMT_KUBECONFIG and TARGET_KUBECONFIG must be set")
+	}
+	ctx := context.Background()
+
+	// A distinct Kind (own group) so this test never shares a CRD with TestE2E_RemoteCompositionMirror
+	// — the two run sequentially against the same clusters, and a shared CRD's teardown would race.
+	const tdGroup = "tdmirror.krateo.io"
+	tdAPIVersion := tdGroup + "/" + e2eVersion
+	tdGVR := schema.GroupVersionResource{Group: tdGroup, Version: e2eVersion, Resource: e2ePlural}
+
+	hubCl := coreHubClient(t)
+	_, hubDyn := clientsFor(t, "MGMT_KUBECONFIG")
+	spokeCl, spokeDyn := clientsFor(t, "TARGET_KUBECONFIG")
+
+	// CRDs: this test's composition Kind on both clusters; the core kinds on the hub.
+	applyAndWaitCRD(ctx, t, hubCl, compositionCRDNamed(tdGroup, e2eVersion, e2ePlural, e2eKind))
+	applyAndWaitCRD(ctx, t, spokeCl, compositionCRDNamed(tdGroup, e2eVersion, e2ePlural, e2eKind))
+	applyAndWaitCRD(ctx, t, hubCl, coreCRD("compositiondefinitions", "CompositionDefinition", true))
+	applyAndWaitCRD(ctx, t, hubCl, coreCRD("kubernetestargets", "KubernetesTarget", false))
+
+	// KubernetesTarget + kubeconfig Secret on the hub, pointing at the spoke.
+	targetKubeconfig, err := os.ReadFile(os.Getenv("TARGET_KUBECONFIG"))
+	if err != nil {
+		t.Fatalf("reading target kubeconfig: %v", err)
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "e2e-td-target", Namespace: e2eNamespace},
+		Data:       map[string][]byte{"kubeconfig": targetKubeconfig},
+	}
+	if err := hubCl.Create(ctx, secret); err != nil && !apierrors.IsAlreadyExists(err) {
+		t.Fatalf("creating kubeconfig secret: %v", err)
+	}
+	t.Cleanup(func() { _ = hubCl.Delete(context.Background(), secret) })
+
+	ref := rtv1.SecretKeySelector{Key: "kubeconfig"}
+	ref.Name = "e2e-td-target"
+	ref.Namespace = e2eNamespace
+	kt := &compositiondefinitionsv1alpha1.KubernetesTarget{
+		ObjectMeta: metav1.ObjectMeta{Name: "e2e-td-target", Namespace: e2eNamespace},
+		Spec:       compositiondefinitionsv1alpha1.KubernetesTargetSpec{KubeconfigRef: ref},
+	}
+	if err := hubCl.Create(ctx, kt); err != nil && !apierrors.IsAlreadyExists(err) {
+		t.Fatalf("creating KubernetesTarget: %v", err)
+	}
+	t.Cleanup(func() { _ = hubCl.Delete(context.Background(), kt) })
+
+	// Remote CompositionDefinition with its generated GVK recorded on status.
+	cd := &compositiondefinitionsv1alpha1.CompositionDefinition{
+		ObjectMeta: metav1.ObjectMeta{Name: "e2e-portal-cd", Namespace: e2eNamespace},
+		Spec: compositiondefinitionsv1alpha1.CompositionDefinitionSpec{
+			Chart:  &compositiondefinitionsv1alpha1.ChartInfo{Url: "oci://ghcr.io/x/y", Version: "1.0.0"},
+			Deploy: &compositiondefinitionsv1alpha1.DeploymentTarget{TargetRef: &compositiondefinitionsv1alpha1.TargetReference{Name: "e2e-td-target"}},
+		},
+	}
+	if err := hubCl.Create(ctx, cd); err != nil {
+		t.Fatalf("creating CompositionDefinition: %v", err)
+	}
+	cd.Status.ApiVersion = tdAPIVersion
+	cd.Status.Kind = e2eKind
+	cd.Status.Resource = e2ePlural
+	if err := hubCl.Status().Update(ctx, cd); err != nil {
+		t.Fatalf("setting CD status GVK: %v", err)
+	}
+
+	hubRes := hubDyn.Resource(tdGVR).Namespace(e2eNamespace)
+	spokeRes := spokeDyn.Resource(tdGVR).Namespace(e2eNamespace)
+	if _, err := hubRes.Create(ctx, e2ePortalIn(tdAPIVersion, e2eKind, "portal-x", map[string]interface{}{"tenant": "acme"}, false), metav1.CreateOptions{}); err != nil {
+		t.Fatalf("creating hub Composition: %v", err)
+	}
+
+	r := &Reconciler{hub: hubCl, hubDynamic: hubDyn, log: logging.NewNopLogger()}
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "e2e-portal-cd", Namespace: e2eNamespace}}
+
+	// Live reconcile: adds the finalizer and mirrors the hub Composition to the spoke.
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatalf("reconcile (live): %v", err)
+	}
+	if _, err := spokeRes.Get(ctx, "portal-x", metav1.GetOptions{}); err != nil {
+		t.Fatalf("hub Composition should be mirrored to the spoke: %v", err)
+	}
+	got := &compositiondefinitionsv1alpha1.CompositionDefinition{}
+	if err := hubCl.Get(ctx, req.NamespacedName, got); err != nil {
+		t.Fatalf("get CD: %v", err)
+	}
+	if !controllerutil.ContainsFinalizer(got, cdFinalizer) {
+		t.Fatalf("CD should carry the teardown finalizer after a live reconcile, has %v", got.GetFinalizers())
+	}
+	t.Cleanup(func() { // best effort if a later assertion fails mid-teardown
+		cur := &compositiondefinitionsv1alpha1.CompositionDefinition{}
+		if hubCl.Get(context.Background(), req.NamespacedName, cur) == nil && controllerutil.RemoveFinalizer(cur, cdFinalizer) {
+			_ = hubCl.Update(context.Background(), cur)
+		}
+	})
+
+	// Delete the CD: the finalizer turns this into a deletionTimestamp; reconcile then tears down.
+	if err := hubCl.Delete(ctx, got); err != nil {
+		t.Fatalf("deleting CD: %v", err)
+	}
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatalf("reconcile (delete): %v", err)
+	}
+
+	if _, err := hubRes.Get(ctx, "portal-x", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("hub Composition should be deleted on teardown, got err=%v", err)
+	}
+	if _, err := spokeRes.Get(ctx, "portal-x", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("spoke mirror should be deleted on teardown, got err=%v", err)
+	}
+	if err := hubCl.Get(ctx, req.NamespacedName, got); err == nil {
+		t.Errorf("CD should be gone once the finalizer is released, still present with finalizers %v", got.GetFinalizers())
+	} else if !apierrors.IsNotFound(err) {
+		t.Fatalf("get CD after teardown: %v", err)
+	}
+
+	t.Logf("OK: CD teardown removed hub + spoke instances and released the finalizer")
 }
