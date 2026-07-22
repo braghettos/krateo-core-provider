@@ -49,8 +49,7 @@ import (
 
 const (
 	// managedByLabel marks spoke Composition instances this reflector created, so garbage collection
-	// only ever deletes mirrors it owns — never instances authored directly on the spoke, or created
-	// by the RemoteInstall migration shim.
+	// only ever deletes mirrors it owns — never instances authored directly on the spoke.
 	managedByLabel = "compositionmirror.krateo.io/managed-by"
 	managedByValue = "core-provider"
 

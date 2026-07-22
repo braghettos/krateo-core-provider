@@ -43,9 +43,9 @@ func IsRemote(target *compositiondefinitionsv1alpha1.DeploymentTarget) bool {
 }
 
 // Remote builds the clients for the remote cluster referenced by target.TargetRef. It
-// resolves the namespaced KubernetesTarget in namespace (the referencing object's OWN
-// namespace — the CompositionDefinition's or RemoteInstall's), then the kubeconfig Secret
-// it points at; both are read from the management cluster via mgmt.
+// resolves the namespaced KubernetesTarget in namespace (the referencing
+// CompositionDefinition's OWN namespace), then the kubeconfig Secret it points at; both are
+// read from the management cluster via mgmt.
 func Remote(ctx context.Context, mgmt client.Client, namespace string, target *compositiondefinitionsv1alpha1.DeploymentTarget) (*Clients, error) {
 	if !IsRemote(target) {
 		return nil, fmt.Errorf("deployment target does not reference a KubernetesTarget")
