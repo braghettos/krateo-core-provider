@@ -616,3 +616,81 @@ func TestDeleteAllHubCompositions(t *testing.T) {
 		t.Errorf("expected all hub compositions deleted, %d remain", len(list.Items))
 	}
 }
+
+func withLabels(u *unstructured.Unstructured, labels map[string]string) *unstructured.Unstructured {
+	existing := u.GetLabels()
+	if existing == nil {
+		existing = map[string]string{}
+	}
+	for k, v := range labels {
+		existing[k] = v
+	}
+	u.SetLabels(existing)
+	return u
+}
+
+// The spoke cdc resolves an instance's CompositionDefinition from krateo.io/composition-definition-*
+// (+ composition-version) labels. mirrorDown must carry the hub Composition's labels onto the spoke
+// mirror so resolution doesn't depend on the projected admission policy or the unique-kind fallback —
+// while keeping the management marker and preserving any labels the spoke itself added.
+func TestReflectInstances_PropagatesDefinitionRefLabels(t *testing.T) {
+	ctx := context.Background()
+	refLabels := map[string]string{
+		"krateo.io/composition-definition-name":     "my-cd",
+		"krateo.io/composition-definition-resource": "portals",
+		"krateo.io/composition-version":             "v1-0-0",
+	}
+
+	// portal-new: hub-only (create path). portal-upd: already mirrored with a spoke-added label
+	// (update path — must be preserved).
+	hub := newFakeDyn(
+		withLabels(portal("portal-new", map[string]interface{}{"replicas": int64(1)}, false), refLabels),
+		withLabels(portal("portal-upd", map[string]interface{}{"replicas": int64(1)}, false), refLabels),
+	)
+	spoke := newFakeDyn(
+		withLabels(portal("portal-upd", map[string]interface{}{"replicas": int64(9)}, true), map[string]string{"spoke.local/added": "keep"}),
+	)
+
+	if err := reflectInstances(ctx, reflectParams{
+		hub:           hub,
+		resolveSpoke:  mapResolver(map[string]dynamic.Interface{"spoke-default": spoke}),
+		defaultTarget: "spoke-default",
+		gvr:           testGVR,
+		apiVersion:    testAPIVersion,
+		kind:          testKind,
+		namespace:     testNamespace,
+		log:           logging.NewNopLogger(),
+	}); err != nil {
+		t.Fatalf("reflectInstances: %v", err)
+	}
+	res := spoke.Resource(testGVR).Namespace(testNamespace)
+
+	// create path: mirror carries the definition-ref labels + management marker.
+	nw, err := res.Get(ctx, "portal-new", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("portal-new mirror not created: %v", err)
+	}
+	for k, want := range refLabels {
+		if nw.GetLabels()[k] != want {
+			t.Errorf("portal-new mirror label %q = %q, want %q (labels %v)", k, nw.GetLabels()[k], want, nw.GetLabels())
+		}
+	}
+	if nw.GetLabels()[managedByLabel] != managedByValue {
+		t.Errorf("portal-new mirror missing management label")
+	}
+
+	// update path: definition-ref labels synced on, management marker kept, spoke-added label preserved.
+	up, err := res.Get(ctx, "portal-upd", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("portal-upd get: %v", err)
+	}
+	if up.GetLabels()["krateo.io/composition-definition-name"] != "my-cd" {
+		t.Errorf("portal-upd mirror missing synced definition-ref label, has %v", up.GetLabels())
+	}
+	if up.GetLabels()[managedByLabel] != managedByValue {
+		t.Errorf("portal-upd mirror lost management label")
+	}
+	if up.GetLabels()["spoke.local/added"] != "keep" {
+		t.Errorf("portal-upd mirror dropped the spoke-added label, has %v", up.GetLabels())
+	}
+}
