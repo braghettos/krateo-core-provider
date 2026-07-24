@@ -583,6 +583,19 @@ func remoteSpokeDynamic(ctx context.Context, mgmt client.Client, ns, target stri
 	return clients.Dynamic, nil
 }
 
+// mirrorLabels are the labels a spoke mirror should carry: the hub Composition's own labels — which
+// include the krateo.io/composition-definition-* and composition-version labels the spoke cdc uses to
+// resolve this instance's CompositionDefinition (see composition-dynamic-controller archive/getter) —
+// plus the reflector's management marker so garbage collection can recognise the mirror.
+func mirrorLabels(hubInst *unstructured.Unstructured) map[string]string {
+	labels := map[string]string{}
+	for k, v := range hubInst.GetLabels() {
+		labels[k] = v
+	}
+	labels[managedByLabel] = managedByValue
+	return labels
+}
+
 // mirrorDown creates-or-updates the spoke Composition from its hub counterpart. The hub is the source
 // of truth for spec (hub wins on drift); the mirror is stamped with the management label so GC can
 // recognise it.
@@ -599,7 +612,7 @@ func mirrorDown(ctx context.Context, spokeRes dynamic.ResourceInterface, hubInst
 		mirror.SetKind(kind)
 		mirror.SetNamespace(namespace)
 		mirror.SetName(hubInst.GetName())
-		mirror.SetLabels(map[string]string{managedByLabel: managedByValue})
+		mirror.SetLabels(mirrorLabels(hubInst))
 		if spec != nil {
 			if err := unstructured.SetNestedMap(mirror.Object, spec, "spec"); err != nil {
 				return fmt.Errorf("setting mirror spec: %w", err)
@@ -611,10 +624,18 @@ func mirrorDown(ctx context.Context, spokeRes dynamic.ResourceInterface, hubInst
 		return fmt.Errorf("reading spoke mirror: %w", err)
 	}
 
-	// Ensure the management label is present, then push the desired spec (hub wins on drift).
+	// Sync the hub's labels onto the mirror (hub wins for keys it sets) and ensure the management
+	// marker, preserving any other labels the spoke added. The hub's labels include the
+	// krateo.io/composition-definition-* and composition-version labels the spoke cdc resolves this
+	// instance's CompositionDefinition against, so the mirror carries them directly rather than
+	// relying on the projected admission policy or the cdc's unique-kind fallback. Then push the
+	// desired spec (hub wins on drift).
 	labels := live.GetLabels()
 	if labels == nil {
 		labels = map[string]string{}
+	}
+	for k, v := range hubInst.GetLabels() {
+		labels[k] = v
 	}
 	labels[managedByLabel] = managedByValue
 	live.SetLabels(labels)
