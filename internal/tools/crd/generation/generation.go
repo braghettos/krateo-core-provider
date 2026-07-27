@@ -13,7 +13,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime/serializer/json"
 
-	hasher "github.com/krateoplatformops/core-provider/internal/tools/hash"
+	hasher "github.com/krateoplatformops/plumbing/kubeutil/hasher"
 	"github.com/krateoplatformops/plumbing/crdgen"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"

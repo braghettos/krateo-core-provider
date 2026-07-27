@@ -14,7 +14,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 
-	hasher "github.com/krateoplatformops/core-provider/internal/tools/hash"
+	hasher "github.com/krateoplatformops/plumbing/kubeutil/hasher"
 	"github.com/krateoplatformops/plumbing/e2e"
 	xenv "github.com/krateoplatformops/plumbing/env"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"

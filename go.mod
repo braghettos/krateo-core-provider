@@ -8,7 +8,7 @@ require (
 	github.com/gobuffalo/flect v1.0.3
 	github.com/google/go-cmp v0.7.0
 	github.com/itchyny/gojq v0.12.17
-	github.com/krateoplatformops/plumbing v1.7.2
+	github.com/krateoplatformops/plumbing v1.12.0
 	github.com/krateoplatformops/provider-runtime v1.2.1
 	github.com/stoewer/go-strcase v1.3.1
 	github.com/stretchr/testify v1.11.1
@@ -132,6 +132,6 @@ require (
 	sigs.k8s.io/structured-merge-diff/v6 v6.3.2-0.20260122202528-d9cc6641c482 // indirect
 )
 
-replace github.com/krateoplatformops/plumbing => github.com/braghettos/plumbing v1.11.0
+replace github.com/krateoplatformops/plumbing => github.com/braghettos/plumbing v1.12.0
 
 replace github.com/krateoplatformops/provider-runtime => github.com/braghettos/provider-runtime v1.2.2

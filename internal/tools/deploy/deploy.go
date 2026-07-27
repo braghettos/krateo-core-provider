@@ -19,7 +19,7 @@ import (
 	definitionsv1alpha1 "github.com/krateoplatformops/core-provider/apis/compositiondefinitions/v1alpha1"
 	crd "github.com/krateoplatformops/core-provider/internal/tools/crd"
 	deployment "github.com/krateoplatformops/core-provider/internal/tools/deployment"
-	hasher "github.com/krateoplatformops/core-provider/internal/tools/hash"
+	hasher "github.com/krateoplatformops/plumbing/kubeutil/hasher"
 	kubecli "github.com/krateoplatformops/core-provider/internal/tools/kube"
 	"github.com/krateoplatformops/core-provider/internal/tools/objects"
 	appsv1 "k8s.io/api/apps/v1"

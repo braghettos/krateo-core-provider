@@ -3,7 +3,7 @@ package deploy
 import (
 	"testing"
 
-	hasher "github.com/krateoplatformops/core-provider/internal/tools/hash"
+	hasher "github.com/krateoplatformops/plumbing/kubeutil/hasher"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )

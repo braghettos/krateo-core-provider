@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 
 	contexttools "github.com/krateoplatformops/core-provider/internal/tools/context"
-	hasher "github.com/krateoplatformops/core-provider/internal/tools/hash"
+	hasher "github.com/krateoplatformops/plumbing/kubeutil/hasher"
 	kubecli "github.com/krateoplatformops/core-provider/internal/tools/kube"
 	"github.com/krateoplatformops/core-provider/internal/tools/objects"
 	"github.com/krateoplatformops/provider-runtime/pkg/logging"
