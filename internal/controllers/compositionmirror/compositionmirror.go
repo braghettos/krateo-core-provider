@@ -24,11 +24,11 @@ import (
 	"context"
 	"fmt"
 	"reflect"
-	"sync"
 	"time"
 
 	compositiondefinitionsv1alpha1 "github.com/krateoplatformops/core-provider/apis/compositiondefinitions/v1alpha1"
 	"github.com/krateoplatformops/core-provider/internal/tools/clusterkube"
+	"github.com/krateoplatformops/plumbing/kubeutil/dynamicwatch"
 	"github.com/krateoplatformops/provider-runtime/pkg/controller"
 	"github.com/krateoplatformops/provider-runtime/pkg/logging"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -37,14 +37,12 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	crcontroller "sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-	"sigs.k8s.io/controller-runtime/pkg/source"
 )
 
 const (
@@ -88,8 +86,7 @@ func Setup(mgr ctrl.Manager, o Options) error {
 	r := &Reconciler{
 		hub:        mgr.GetClient(),
 		hubDynamic: dynamic.NewForConfigOrDie(mgr.GetConfig()),
-		cache:      mgr.GetCache(),
-		watched:    map[schema.GroupVersionKind]struct{}{},
+		cfgWatch:   dynamicwatch.NewRegistry(mgr.GetCache()),
 		log:        o.ControllerOptions.Logger.WithValues("controller", "compositionmirror"),
 	}
 	c, err := ctrl.NewControllerManagedBy(mgr).
@@ -113,14 +110,13 @@ type Reconciler struct {
 	// it to return per-target fakes so the engine can be exercised across several spokes without a real
 	// cluster.
 	newSpoke func(ctx context.Context, mgmt client.Client, ns, target string) (dynamic.Interface, error)
-	// cache and ctrl back the dynamic per-Kind watches. Because composition Kinds are generated at
+	// cfgWatch and ctrl back the dynamic per-Kind watches. Because composition Kinds are generated at
 	// runtime, the reflector registers a watch for each Kind the first time it reconciles that Kind's
-	// CompositionDefinition (see ensureWatch); watched dedupes registration.
-	cache   cache.Cache
-	ctrl    crcontroller.Controller
-	mu      sync.Mutex
-	watched map[schema.GroupVersionKind]struct{}
-	log     logging.Logger
+	// CompositionDefinition (see ensureWatch); cfgWatch (plumbing/kubeutil/dynamicwatch.Registry) dedupes
+	// registration across reconciles of many different CompositionDefinitions.
+	cfgWatch *dynamicwatch.Registry
+	ctrl     crcontroller.Controller
+	log      logging.Logger
 }
 
 // Reconcile enumerates and reflects the hub Composition instances of one remote CompositionDefinition.
@@ -382,26 +378,14 @@ func (r *Reconciler) ensureWatch(gvk schema.GroupVersionKind) {
 	if r.ctrl == nil {
 		return // not wired for dynamic watches (e.g. under unit tests); resync still reflects
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if _, ok := r.watched[gvk]; ok {
-		return
-	}
-	obj := &unstructured.Unstructured{}
-	obj.SetGroupVersionKind(gvk)
-	var co client.Object = obj
 	// GenerationChangedPredicate reconciles on spec changes, creates and deletes, but NOT on
 	// status-only / metadata updates. That is essential: the reflector writes the spoke status back
 	// onto the hub Composition, and reconciling on that write would loop. (Status updates leave
 	// metadata.generation unchanged because the composition CRD has a status subresource.)
-	src := source.Kind(r.cache, co,
-		handler.EnqueueRequestsFromMapFunc(enqueueCDForComposition(r.hub)),
-		predicate.GenerationChangedPredicate{})
-	if err := r.ctrl.Watch(src); err != nil {
+	if err := r.cfgWatch.EnsureWatch(r.ctrl, gvk, enqueueCDForComposition(r.hub), predicate.GenerationChangedPredicate{}); err != nil {
 		r.log.Debug("compositionmirror: dynamic watch registration deferred", "gvk", gvk.String(), "error", err)
 		return
 	}
-	r.watched[gvk] = struct{}{}
 	r.log.Debug("compositionmirror: registered dynamic watch on hub Kind", "gvk", gvk.String())
 }
 
