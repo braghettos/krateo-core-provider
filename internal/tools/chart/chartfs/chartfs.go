@@ -10,7 +10,7 @@ import (
 	"github.com/krateoplatformops/core-provider/internal/tools/resolvers"
 	"github.com/krateoplatformops/core-provider/internal/tools/tgzfs"
 	"github.com/krateoplatformops/plumbing/helm/getter"
-	"sigs.k8s.io/controller-runtime/pkg/client"
+	"k8s.io/client-go/dynamic"
 )
 
 func FromReader(in io.Reader, pkgurl string) (*ChartFS, error) {
@@ -42,7 +42,7 @@ func FromReader(in io.Reader, pkgurl string) (*ChartFS, error) {
 	}, nil
 }
 
-func ForSpec(ctx context.Context, kube client.Client, nfo *v1alpha1.ChartInfo) (*ChartFS, error) {
+func ForSpec(ctx context.Context, dyn dynamic.Interface, nfo *v1alpha1.ChartInfo) (*ChartFS, error) {
 	if nfo == nil {
 		return nil, fmt.Errorf("chart infos cannot be nil")
 	}
@@ -53,7 +53,7 @@ func ForSpec(ctx context.Context, kube client.Client, nfo *v1alpha1.ChartInfo) (
 		getter.WithInsecureSkipVerifyTLS(nfo.InsecureSkipVerifyTLS),
 	}
 	if nfo.Credentials != nil {
-		secret, err := resolvers.GetSecret(ctx, kube, nfo.Credentials.PasswordRef)
+		secret, err := resolvers.GetSecret(ctx, dyn, nfo.Credentials.PasswordRef)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get secret: %w", err)
 		}

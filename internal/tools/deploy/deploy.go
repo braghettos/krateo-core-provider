@@ -19,9 +19,9 @@ import (
 	definitionsv1alpha1 "github.com/krateoplatformops/core-provider/apis/compositiondefinitions/v1alpha1"
 	crd "github.com/krateoplatformops/core-provider/internal/tools/crd"
 	deployment "github.com/krateoplatformops/core-provider/internal/tools/deployment"
-	hasher "github.com/krateoplatformops/plumbing/kubeutil/hasher"
 	kubecli "github.com/krateoplatformops/core-provider/internal/tools/kube"
 	"github.com/krateoplatformops/core-provider/internal/tools/objects"
+	hasher "github.com/krateoplatformops/plumbing/kubeutil/hasher"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -162,12 +162,12 @@ func createRBACResources(gvr schema.GroupVersionResource, rbacNSName types.Names
 	return sa, clusterrole, clusterrolebinding, role, rolebinding, nil
 }
 
-func installRBACResources(ctx context.Context, kubeClient client.Client, clusterrole rbacv1.ClusterRole, clusterrolebinding rbacv1.ClusterRoleBinding, role rbacv1.Role, rolebinding rbacv1.RoleBinding, sa corev1.ServiceAccount, hsh *hasher.ObjectHash, applyOpts kubecli.ApplyOptions) error {
+func installRBACResources(ctx context.Context, dyn dynamic.Interface, clusterrole rbacv1.ClusterRole, clusterrolebinding rbacv1.ClusterRoleBinding, role rbacv1.Role, rolebinding rbacv1.RoleBinding, sa corev1.ServiceAccount, hsh *hasher.ObjectHash, applyOpts kubecli.ApplyOptions) error {
 	if hsh == nil {
 		return fmt.Errorf("hasher is required")
 	}
 	log := contexttools.LoggerFromCtx(ctx, logging.NewNopLogger())
-	err := kubecli.Apply(ctx, kubeClient, &clusterrole, applyOpts)
+	err := kubecli.Apply(ctx, dyn, clusterRoleGVR, &clusterrole, applyOpts)
 	if err != nil {
 		log.Error(err, "installing clusterrole", "name", clusterrole.Name, "namespace", clusterrole.Namespace)
 		return err
@@ -179,7 +179,7 @@ func installRBACResources(ctx context.Context, kubeClient client.Client, cluster
 	}
 	log.Debug("ClusterRole successfully hashed", "name", clusterrole.Name, "namespace", clusterrole.Namespace, "digest", hsh.GetHash())
 
-	err = kubecli.Apply(ctx, kubeClient, &clusterrolebinding, applyOpts)
+	err = kubecli.Apply(ctx, dyn, clusterRoleBindingGVR, &clusterrolebinding, applyOpts)
 	if err != nil {
 		log.Error(err, "installing clusterrolebinding", "name", clusterrolebinding.Name, "namespace", clusterrolebinding.Namespace)
 		return err
@@ -190,7 +190,7 @@ func installRBACResources(ctx context.Context, kubeClient client.Client, cluster
 	}
 	log.Debug("ClusterRoleBinding successfully installed", "name", clusterrolebinding.Name, "namespace", clusterrolebinding.Namespace, "digest", hsh.GetHash())
 
-	err = kubecli.Apply(ctx, kubeClient, &role, applyOpts)
+	err = kubecli.Apply(ctx, dyn, roleGVR, &role, applyOpts)
 	if err != nil {
 		log.Error(err, "installing role", "name", role.Name, "namespace", role.Namespace)
 		return err
@@ -201,7 +201,7 @@ func installRBACResources(ctx context.Context, kubeClient client.Client, cluster
 	}
 	log.Debug("Role successfully installed", "name", role.Name, "namespace", role.Namespace, "digest", hsh.GetHash())
 
-	err = kubecli.Apply(ctx, kubeClient, &rolebinding, applyOpts)
+	err = kubecli.Apply(ctx, dyn, roleBindingGVR, &rolebinding, applyOpts)
 	if err != nil {
 		log.Error(err, "installing rolebinding", "name", rolebinding.Name, "namespace", rolebinding.Namespace)
 		return err
@@ -213,7 +213,7 @@ func installRBACResources(ctx context.Context, kubeClient client.Client, cluster
 
 	log.Debug("RoleBinding successfully installed", "name", rolebinding.Name, "namespace", rolebinding.Namespace, "digest", hsh.GetHash())
 
-	err = kubecli.Apply(ctx, kubeClient, &sa, applyOpts)
+	err = kubecli.Apply(ctx, dyn, serviceAccountGVR, &sa, applyOpts)
 	if err != nil {
 		log.Error(err, "installing serviceaccount", "name", sa.Name, "namespace", sa.Namespace)
 		return err
@@ -227,13 +227,13 @@ func installRBACResources(ctx context.Context, kubeClient client.Client, cluster
 	return nil
 }
 
-func lookupRBACResources(ctx context.Context, kubeClient client.Client, clusterrole rbacv1.ClusterRole, clusterrolebinding rbacv1.ClusterRoleBinding, role rbacv1.Role, rolebinding rbacv1.RoleBinding, sa corev1.ServiceAccount, hsh *hasher.ObjectHash) error {
+func lookupRBACResources(ctx context.Context, dyn dynamic.Interface, clusterrole rbacv1.ClusterRole, clusterrolebinding rbacv1.ClusterRoleBinding, role rbacv1.Role, rolebinding rbacv1.RoleBinding, sa corev1.ServiceAccount, hsh *hasher.ObjectHash) error {
 	if hsh == nil {
 		return fmt.Errorf("hasher is required")
 	}
 	log := contexttools.LoggerFromCtx(ctx, logging.NewNopLogger())
 
-	err := kubecli.Get(ctx, kubeClient, &clusterrole)
+	err := kubecli.Get(ctx, dyn, clusterRoleGVR, &clusterrole)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			log.Debug("ClusterRole not found", "name", clusterrole.Name, "namespace", clusterrole.Namespace)
@@ -248,7 +248,7 @@ func lookupRBACResources(ctx context.Context, kubeClient client.Client, clusterr
 	}
 	log.Debug("ClusterRole successfully fetched", "name", clusterrole.Name, "namespace", clusterrole.Namespace, "digest", hsh.GetHash())
 
-	err = kubecli.Get(ctx, kubeClient, &clusterrolebinding)
+	err = kubecli.Get(ctx, dyn, clusterRoleBindingGVR, &clusterrolebinding)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			log.Debug("ClusterRoleBinding not found", "name", clusterrolebinding.Name, "namespace", clusterrolebinding.Namespace)
@@ -263,7 +263,7 @@ func lookupRBACResources(ctx context.Context, kubeClient client.Client, clusterr
 	}
 	log.Debug("ClusterRoleBinding successfully fetched", "name", clusterrolebinding.Name, "namespace", clusterrolebinding.Namespace, "digest", hsh.GetHash())
 
-	err = kubecli.Get(ctx, kubeClient, &role)
+	err = kubecli.Get(ctx, dyn, roleGVR, &role)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			log.Debug("Role not found", "name", role.Name, "namespace", role.Namespace)
@@ -278,7 +278,7 @@ func lookupRBACResources(ctx context.Context, kubeClient client.Client, clusterr
 	}
 	log.Debug("Role successfully fetched", "name", role.Name, "namespace", role.Namespace, "digest", hsh.GetHash())
 
-	err = kubecli.Get(ctx, kubeClient, &rolebinding)
+	err = kubecli.Get(ctx, dyn, roleBindingGVR, &rolebinding)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			log.Debug("RoleBinding not found", "name", rolebinding.Name, "namespace", rolebinding.Namespace)
@@ -293,7 +293,7 @@ func lookupRBACResources(ctx context.Context, kubeClient client.Client, clusterr
 	}
 	log.Debug("RoleBinding successfully fetched", "name", rolebinding.Name, "namespace", rolebinding.Namespace, "digest", hsh.GetHash())
 
-	err = kubecli.Get(ctx, kubeClient, &sa)
+	err = kubecli.Get(ctx, dyn, serviceAccountGVR, &sa)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			log.Debug("ServiceAccount not found", "name", sa.Name, "namespace", sa.Namespace)
@@ -311,38 +311,38 @@ func lookupRBACResources(ctx context.Context, kubeClient client.Client, clusterr
 	return nil
 }
 
-func uninstallRBACResources(ctx context.Context, kubeClient client.Client, clusterrole rbacv1.ClusterRole, clusterrolebinding rbacv1.ClusterRoleBinding, role rbacv1.Role, rolebinding rbacv1.RoleBinding, sa corev1.ServiceAccount) error {
+func uninstallRBACResources(ctx context.Context, dyn dynamic.Interface, clusterrole rbacv1.ClusterRole, clusterrolebinding rbacv1.ClusterRoleBinding, role rbacv1.Role, rolebinding rbacv1.RoleBinding, sa corev1.ServiceAccount) error {
 	log := contexttools.LoggerFromCtx(ctx, logging.NewNopLogger())
 
-	err := kubecli.Uninstall(ctx, kubeClient, &clusterrole, kubecli.UninstallOptions{})
+	err := kubecli.Uninstall(ctx, dyn, clusterRoleGVR, &clusterrole, kubecli.UninstallOptions{})
 	if err != nil {
 		log.Error(err, "Error uninstalling clusterrole", "name", clusterrole.Name, "namespace", clusterrole.Namespace)
 		return err
 	}
 	log.Debug("ClusterRole successfully uninstalled", "name", clusterrole.Name, "namespace", clusterrole.Namespace)
 
-	err = kubecli.Uninstall(ctx, kubeClient, &clusterrolebinding, kubecli.UninstallOptions{})
+	err = kubecli.Uninstall(ctx, dyn, clusterRoleBindingGVR, &clusterrolebinding, kubecli.UninstallOptions{})
 	if err != nil {
 		log.Error(err, "Error uninstalling clusterrolebinding", "name", clusterrolebinding.Name, "namespace", clusterrolebinding.Namespace)
 		return err
 	}
 	log.Debug("ClusterRoleBinding successfully uninstalled", "name", clusterrolebinding.Name, "namespace", clusterrolebinding.Namespace)
 
-	err = kubecli.Uninstall(ctx, kubeClient, &role, kubecli.UninstallOptions{})
+	err = kubecli.Uninstall(ctx, dyn, roleGVR, &role, kubecli.UninstallOptions{})
 	if err != nil {
 		log.Error(err, "uninstalling role", "name", role.Name, "namespace", role.Namespace)
 		return err
 	}
 	log.Debug("Role successfully uninstalled", "name", role.Name, "namespace", role.Namespace)
 
-	err = kubecli.Uninstall(ctx, kubeClient, &rolebinding, kubecli.UninstallOptions{})
+	err = kubecli.Uninstall(ctx, dyn, roleBindingGVR, &rolebinding, kubecli.UninstallOptions{})
 	if err != nil {
 		log.Error(err, "uninstalling rolebinding", "name", rolebinding.Name, "namespace", rolebinding.Namespace)
 		return err
 	}
 	log.Debug("RoleBinding successfully uninstalled", "name", rolebinding.Name, "namespace", rolebinding.Namespace)
 
-	err = kubecli.Uninstall(ctx, kubeClient, &sa, kubecli.UninstallOptions{})
+	err = kubecli.Uninstall(ctx, dyn, serviceAccountGVR, &sa, kubecli.UninstallOptions{})
 	if err != nil {
 		log.Error(err, "uninstalling serviceaccount", "name", sa.Name, "namespace", sa.Namespace)
 		return err
@@ -384,7 +384,7 @@ func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 			return "", err
 		}
 
-		err = kubecli.Apply(ctx, kube, &role, applyOpts)
+		err = kubecli.Apply(ctx, opts.DynClient, roleGVR, &role, applyOpts)
 		if err != nil {
 			log.Error(err, "installing role")
 			return "", err
@@ -408,7 +408,7 @@ func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 			return "", err
 		}
 
-		err = kubecli.Apply(ctx, kube, &rolebinding, applyOpts)
+		err = kubecli.Apply(ctx, opts.DynClient, roleBindingGVR, &rolebinding, applyOpts)
 		if err != nil {
 			log.Error(err, "installing rolebinding")
 			return "", err
@@ -420,14 +420,14 @@ func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 		log.Debug("RoleBinding successfully installed", "gvr", opts.GVR.String(), "name", rolebinding.Name, "namespace", rolebinding.Namespace, "digest", hsh.GetHash())
 	}
 
-	err = installRBACResources(ctx, opts.KubeClient, clusterrole, clusterrolebinding, role, rolebinding, sa, &hsh, applyOpts)
+	err = installRBACResources(ctx, opts.DynClient, clusterrole, clusterrolebinding, role, rolebinding, sa, &hsh, applyOpts)
 	if err != nil {
 		return "", err
 	}
 
 	// When the CompositionDefinition declares an apiRef, register the CDC ServiceAccount in
 	// authn's allowlist so it can exchange its projected token for a service JWT.
-	err = applyAuthnServiceAccountMapping(ctx, opts.KubeClient, opts, sa.Name, sa.Namespace, &hsh, applyOpts)
+	err = applyAuthnServiceAccountMapping(ctx, opts.DynClient, opts, sa.Name, sa.Namespace, &hsh, applyOpts)
 	if err != nil {
 		return "", err
 	}
@@ -435,7 +435,7 @@ func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 	// Ensure core-provider's OWN authn mapping exists before calling /rbac (which authenticates
 	// with core-provider's projected token). Provisioned at runtime — lazily, once authn is up —
 	// rather than declaratively at bootstrap, where the authn CRD does not yet exist.
-	err = ensureSelfAuthnMapping(ctx, opts.KubeClient, opts, applyOpts)
+	err = ensureSelfAuthnMapping(ctx, opts.DynClient, opts, applyOpts)
 	if err != nil {
 		return "", err
 	}
@@ -443,7 +443,7 @@ func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 	// ...and grant the per-composition group exactly the in-cluster reads the referenced
 	// RESTAction performs (snowplow GET /rbac). Returns restactionrbac.ErrIncomplete on a 422 —
 	// the caller maps that to the ApiRefRBACIncomplete condition instead of writing partial RBAC.
-	err = applyRestActionRBAC(ctx, opts.KubeClient, opts, sa.Name, &hsh, applyOpts)
+	err = applyRestActionRBAC(ctx, opts.DynClient, opts, sa.Name, &hsh, applyOpts)
 	if err != nil {
 		return "", err
 	}
@@ -455,7 +455,7 @@ func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 	if err != nil {
 		return "", fmt.Errorf("error creating ConfigMap for JSON schema: %w", err)
 	}
-	err = kubecli.Apply(ctx, opts.KubeClient, &jsonSchemaConfigmap, applyOpts)
+	err = kubecli.Apply(ctx, opts.DynClient, configMapGVR, &jsonSchemaConfigmap, applyOpts)
 	if err != nil {
 		return "", fmt.Errorf("error applying ConfigMap for JSON schema: %w", err)
 	}
@@ -476,7 +476,7 @@ func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 	if err != nil {
 		return "", err
 	}
-	err = kubecli.Apply(ctx, opts.KubeClient, &cm, applyOpts)
+	err = kubecli.Apply(ctx, opts.DynClient, configMapGVR, &cm, applyOpts)
 	if err != nil {
 		log.Error(err, "installing configmap")
 		return "", err
@@ -519,7 +519,7 @@ func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 	if err != nil {
 		return "", err
 	}
-	err = kubecli.Apply(ctx, opts.KubeClient, &dep, applyOpts)
+	err = kubecli.Apply(ctx, opts.DynClient, deploymentGVR, &dep, applyOpts)
 	if err != nil {
 		log.Error(err, "installing deployment")
 		return "", err
@@ -542,7 +542,7 @@ func Deploy(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 			return "", err
 		}
 
-		err = kubecli.Apply(ctx, opts.KubeClient, &svc, applyOpts)
+		err = kubecli.Apply(ctx, opts.DynClient, serviceGVR, &svc, applyOpts)
 		if err != nil {
 			log.Error(err, "installing service")
 			return "", err
@@ -625,7 +625,7 @@ func Undeploy(ctx context.Context, kube client.Client, opts UndeployOptions) err
 	if err != nil {
 		return fmt.Errorf("error creating ConfigMap for JSON schema: %w", err)
 	}
-	err = kubecli.Uninstall(ctx, opts.KubeClient, &jsonSchemaConfigmap, kubecli.UninstallOptions{})
+	err = kubecli.Uninstall(ctx, opts.DynamicClient, configMapGVR, &jsonSchemaConfigmap, kubecli.UninstallOptions{})
 	if err != nil {
 		log.Error(err, "Error uninstalling ConfigMap for JSON schema")
 		return err
@@ -646,7 +646,7 @@ func Undeploy(ctx context.Context, kube client.Client, opts UndeployOptions) err
 		return err
 	}
 
-	err = kubecli.Uninstall(ctx, opts.KubeClient, &dep, kubecli.UninstallOptions{})
+	err = kubecli.Uninstall(ctx, opts.DynamicClient, deploymentGVR, &dep, kubecli.UninstallOptions{})
 	if err != nil {
 		log.Error(err, "Error uninstalling deployment", "gvr", opts.GVR.String(), "name", dep.Name, "namespace", dep.Namespace)
 		return err
@@ -665,14 +665,14 @@ func Undeploy(ctx context.Context, kube client.Client, opts UndeployOptions) err
 		return err
 	}
 
-	err = kubecli.Uninstall(ctx, opts.KubeClient, &cm, kubecli.UninstallOptions{})
+	err = kubecli.Uninstall(ctx, opts.DynamicClient, configMapGVR, &cm, kubecli.UninstallOptions{})
 	if err != nil {
 		log.Error(err, "uninstalling configmap")
 		return err
 	}
 	log.Debug("Configmap successfully uninstalled", "gvr", opts.GVR.String(), "name", cm.Name, "namespace", cm.Namespace)
 
-	err = uninstallRBACResources(ctx, opts.KubeClient, clusterrole, clusterrolebinding, role, rolebinding, sa)
+	err = uninstallRBACResources(ctx, opts.DynamicClient, clusterrole, clusterrolebinding, role, rolebinding, sa)
 	if err != nil {
 		return err
 	}
@@ -699,7 +699,7 @@ func Undeploy(ctx context.Context, kube client.Client, opts UndeployOptions) err
 			return err
 		}
 
-		err = kubecli.Uninstall(ctx, opts.KubeClient, &svc, kubecli.UninstallOptions{})
+		err = kubecli.Uninstall(ctx, opts.DynamicClient, serviceGVR, &svc, kubecli.UninstallOptions{})
 		if err != nil {
 			log.Error(err, "uninstalling service")
 			return err
@@ -715,7 +715,7 @@ func Undeploy(ctx context.Context, kube client.Client, opts UndeployOptions) err
 			return err
 		}
 
-		err = kubecli.Uninstall(ctx, opts.KubeClient, &role, kubecli.UninstallOptions{})
+		err = kubecli.Uninstall(ctx, opts.DynamicClient, roleGVR, &role, kubecli.UninstallOptions{})
 		if err != nil {
 			log.Error(err, "uninstalling role")
 			return err
@@ -729,7 +729,7 @@ func Undeploy(ctx context.Context, kube client.Client, opts UndeployOptions) err
 			return err
 		}
 
-		err = kubecli.Uninstall(ctx, opts.KubeClient, &rolebinding, kubecli.UninstallOptions{})
+		err = kubecli.Uninstall(ctx, opts.DynamicClient, roleBindingGVR, &rolebinding, kubecli.UninstallOptions{})
 		if err != nil {
 			log.Error(err, "uninstalling rolebinding")
 			return err
@@ -775,7 +775,7 @@ func Lookup(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 			return "", err
 		}
 
-		err = kubecli.Get(ctx, kube, &role)
+		err = kubecli.Get(ctx, opts.DynClient, roleGVR, &role)
 		if err != nil {
 			log.Error(err, "fetching role")
 			return "", err
@@ -793,7 +793,7 @@ func Lookup(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 			return "", err
 		}
 
-		err = kubecli.Get(ctx, kube, &rolebinding)
+		err = kubecli.Get(ctx, opts.DynClient, roleBindingGVR, &rolebinding)
 		if err != nil {
 			log.Error(err, "fetching rolebinding")
 			return "", err
@@ -805,7 +805,7 @@ func Lookup(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 		log.Debug("RoleBinding successfully fetched", "gvr", opts.GVR.String(), "name", rolebinding.Name, "namespace", rolebinding.Namespace, "digest", hsh.GetHash())
 	}
 
-	err = lookupRBACResources(ctx, opts.KubeClient, clusterrole, clusterrolebinding, role, rolebinding, sa, &hsh)
+	err = lookupRBACResources(ctx, opts.DynClient, clusterrole, clusterrolebinding, role, rolebinding, sa, &hsh)
 	if err != nil {
 		return "", err
 	}
@@ -829,7 +829,7 @@ func Lookup(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 	if err != nil {
 		return "", fmt.Errorf("error creating ConfigMap for JSON schema: %w", err)
 	}
-	err = kubecli.Get(ctx, opts.KubeClient, &jsonSchemaConfigmap)
+	err = kubecli.Get(ctx, opts.DynClient, configMapGVR, &jsonSchemaConfigmap)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			log.Debug("JSON Schema ConfigMap not found", "gvr", opts.GVR.String(), "name", jsonSchemaConfigmap.Name, "namespace", jsonSchemaConfigmap.Namespace)
@@ -856,7 +856,7 @@ func Lookup(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 	if err != nil {
 		return "", err
 	}
-	err = kubecli.Get(ctx, opts.KubeClient, &cm)
+	err = kubecli.Get(ctx, opts.DynClient, configMapGVR, &cm)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			log.Debug("Configmap not found", "gvr", opts.GVR.String(), "name", cm.Name, "namespace", cm.Namespace)
@@ -884,7 +884,7 @@ func Lookup(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 		return "", err
 	}
 
-	err = kubecli.Get(ctx, opts.KubeClient, &dep)
+	err = kubecli.Get(ctx, opts.DynClient, deploymentGVR, &dep)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			log.Debug("Deployment not found", "gvr", opts.GVR.String(), "name", dep.Name, "namespace", dep.Namespace)
@@ -911,7 +911,7 @@ func Lookup(ctx context.Context, kube client.Client, opts DeployOptions) (digest
 			log.Error(err, "creating service")
 			return "", err
 		}
-		err = kubecli.Get(ctx, opts.KubeClient, &svc)
+		err = kubecli.Get(ctx, opts.DynClient, serviceGVR, &svc)
 		if err != nil {
 			if apierrors.IsNotFound(err) {
 				log.Debug("Service not found", "gvr", opts.GVR.String(), "name", svc.Name, "namespace", svc.Namespace)

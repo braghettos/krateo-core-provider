@@ -166,7 +166,7 @@ func ApplyOrUpdateCRD(ctx context.Context,
 
 	if crd == nil {
 		log.Debug("Creating CRD", "gvr", gvr.String())
-		err = kube.Apply(ctx, cli, newcrd, kube.ApplyOptions{})
+		err = kube.Apply(ctx, dyn, apiextensionsv1.SchemeGroupVersion.WithResource("customresourcedefinitions"), newcrd, kube.ApplyOptions{})
 		if err != nil {
 			return gvr, fmt.Errorf("error applying CRD: %w", err)
 		}
@@ -197,7 +197,7 @@ func ApplyOrUpdateCRD(ctx context.Context,
 		// Backfill the VERSION printer column onto any pre-existing served versions on the live CRD
 		// (versions created before this feature only got it on new appends otherwise). Idempotent.
 		generation.AddCompositionVersionColumn(crd)
-		err = kube.Apply(ctx, cli, crd, kube.ApplyOptions{})
+		err = kube.Apply(ctx, dyn, apiextensionsv1.SchemeGroupVersion.WithResource("customresourcedefinitions"), crd, kube.ApplyOptions{})
 		if err != nil {
 			return gvr, fmt.Errorf("error applying CRD status update: %w", err)
 		}
@@ -234,7 +234,7 @@ func ApplyOrUpdateCRD(ctx context.Context,
 	setNoneConversion(crd)
 
 	generation.SetServedStorage(crd, gvr.Version, true, false)
-	err = kube.Apply(ctx, cli, crd, kube.ApplyOptions{})
+	err = kube.Apply(ctx, dyn, apiextensionsv1.SchemeGroupVersion.WithResource("customresourcedefinitions"), crd, kube.ApplyOptions{})
 	if err != nil {
 		return gvr, fmt.Errorf("error setting properties on CRD: %w", err)
 	}

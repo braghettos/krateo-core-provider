@@ -23,7 +23,7 @@ import (
 	"github.com/krateoplatformops/provider-runtime/pkg/logging"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"sigs.k8s.io/controller-runtime/pkg/client"
+	"k8s.io/client-go/dynamic"
 	"sigs.k8s.io/yaml"
 )
 
@@ -38,7 +38,7 @@ const (
 var chartGetter = getter.Get
 var chartRetryWait = retry.Wait
 
-func ChartInfoFromSpec(ctx context.Context, kube client.Client, nfo *v1alpha1.ChartInfo) (pkg fs.FS, rootDir string, err error) {
+func ChartInfoFromSpec(ctx context.Context, dyn dynamic.Interface, nfo *v1alpha1.ChartInfo) (pkg fs.FS, rootDir string, err error) {
 	log := contexttools.LoggerFromCtx(ctx, logging.NewNopLogger())
 
 	if nfo == nil {
@@ -50,7 +50,7 @@ func ChartInfoFromSpec(ctx context.Context, kube client.Client, nfo *v1alpha1.Ch
 		getter.WithInsecureSkipVerifyTLS(nfo.InsecureSkipVerifyTLS),
 	}
 	if nfo.Credentials != nil {
-		secret, err := resolvers.GetSecret(ctx, kube, nfo.Credentials.PasswordRef)
+		secret, err := resolvers.GetSecret(ctx, dyn, nfo.Credentials.PasswordRef)
 		if err != nil {
 			return nil, "", fmt.Errorf("failed to get secret: %w", err)
 		}

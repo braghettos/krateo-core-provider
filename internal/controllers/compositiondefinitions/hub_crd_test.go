@@ -8,10 +8,54 @@ import (
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
+
+var crdGVR = schema.GroupVersionResource{Group: "apiextensions.k8s.io", Version: "v1", Resource: "customresourcedefinitions"}
+
+// fakeMgmtDynamic seeds a fake dynamic client with obj (converted to unstructured) at the well-known CRD
+// GVR — the target of syncHubCompositionCRDVersions' final kube.Apply, which reads/writes the hub CRD's
+// spec.versions through mgmtDynamic (the storedVersions trim above it still goes through the typed mgmt
+// client's Status().Update, untouched by this migration).
+func fakeMgmtDynamic(t *testing.T, obj *apiextensionsv1.CustomResourceDefinition) *dynamicfake.FakeDynamicClient {
+	t.Helper()
+	sch := runtime.NewScheme()
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(sch, map[schema.GroupVersionResource]string{crdGVR: "CustomResourceDefinitionList"})
+	if obj == nil {
+		return dyn
+	}
+	raw, err := runtime.DefaultUnstructuredConverter.ToUnstructured(obj)
+	if err != nil {
+		t.Fatalf("converting seed CRD to unstructured: %v", err)
+	}
+	u := &unstructured.Unstructured{Object: raw}
+	u.SetAPIVersion("apiextensions.k8s.io/v1")
+	u.SetKind("CustomResourceDefinition")
+	if _, err := dyn.Resource(crdGVR).Create(context.Background(), u, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("seeding dynamic fake with CRD: %v", err)
+	}
+	return dyn
+}
+
+// getHubCRDViaDynamic reads name back through the dynamic fake and converts it to a typed CRD, mirroring
+// what the migrated kube.Apply call actually wrote (unlike mgmt.Get, which never sees this write).
+func getHubCRDViaDynamic(t *testing.T, dyn *dynamicfake.FakeDynamicClient, name string) *apiextensionsv1.CustomResourceDefinition {
+	t.Helper()
+	u, err := dyn.Resource(crdGVR).Get(context.Background(), name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("re-reading hub CRD via dynamic client: %v", err)
+	}
+	var out apiextensionsv1.CustomResourceDefinition
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(u.Object, &out); err != nil {
+		t.Fatalf("converting dynamic CRD to typed: %v", err)
+	}
+	return &out
+}
 
 func testCompositionCRD() *apiextensionsv1.CustomResourceDefinition {
 	return &apiextensionsv1.CustomResourceDefinition{
@@ -103,16 +147,16 @@ func TestSyncHubCompositionCRDVersions_DropsStaleAndAddsMissing(t *testing.T) {
 	}
 
 	mgmt := hubSchemeWithStatus(t, hub)
-	e := &external{remote: true, mgmt: mgmt, log: logging.NewNopLogger()}
+	mgmtDynamic := fakeMgmtDynamic(t, hub)
+	e := &external{remote: true, mgmt: mgmt, mgmtDynamic: mgmtDynamic, log: logging.NewNopLogger()}
 
 	if err := e.syncHubCompositionCRDVersions(context.Background(), spoke); err != nil {
 		t.Fatalf("syncHubCompositionCRDVersions: %v", err)
 	}
 
-	got := &apiextensionsv1.CustomResourceDefinition{}
-	if err := mgmt.Get(context.Background(), client.ObjectKey{Name: hub.Name}, got); err != nil {
-		t.Fatalf("re-reading hub CRD: %v", err)
-	}
+	// The final spec.versions rewrite goes through mgmtDynamic (kube.Apply), not mgmt — only the
+	// storedVersions trim above it still goes through mgmt's Status().Update.
+	got := getHubCRDViaDynamic(t, mgmtDynamic, hub.Name)
 
 	names := versionNameSet(got)
 	if names["v1-0-0"] {

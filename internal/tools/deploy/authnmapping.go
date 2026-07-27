@@ -6,15 +6,16 @@ import (
 	"path/filepath"
 
 	contexttools "github.com/krateoplatformops/core-provider/internal/tools/context"
-	hasher "github.com/krateoplatformops/plumbing/kubeutil/hasher"
 	kubecli "github.com/krateoplatformops/core-provider/internal/tools/kube"
 	"github.com/krateoplatformops/core-provider/internal/tools/objects"
+	hasher "github.com/krateoplatformops/plumbing/kubeutil/hasher"
 	"github.com/krateoplatformops/provider-runtime/pkg/logging"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/dynamic"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -35,6 +36,11 @@ var authnServiceAccountGVK = schema.GroupVersionKind{
 	Version: "v1alpha1",
 	Kind:    "ServiceAccount",
 }
+
+// authnServiceAccountGVR is authnServiceAccountGVK's plural resource form (confirmed against the authn
+// CRD's spec.names.plural, not guessed): required by kubecli.Apply's dynamic.Interface, which — unlike
+// client.Client's REST mapper — cannot infer a GVR from a GVK.
+var authnServiceAccountGVR = authnServiceAccountGVK.GroupVersion().WithResource("serviceaccounts")
 
 func authnNamespaceOrDefault(ns string) string {
 	if ns == "" {
@@ -89,7 +95,7 @@ func hashAuthnServiceAccountMapping(opts DeployOptions, saName string, hsh *hash
 }
 
 // applyAuthnServiceAccountMapping renders, applies, and hashes the mapping. No-op without apiRef.
-func applyAuthnServiceAccountMapping(ctx context.Context, kube client.Client, opts DeployOptions, saName, saNamespace string, hsh *hasher.ObjectHash, applyOpts kubecli.ApplyOptions) error {
+func applyAuthnServiceAccountMapping(ctx context.Context, dyn dynamic.Interface, opts DeployOptions, saName, saNamespace string, hsh *hasher.ObjectHash, applyOpts kubecli.ApplyOptions) error {
 	if opts.ApiRefName == "" {
 		return nil
 	}
@@ -99,7 +105,7 @@ func applyAuthnServiceAccountMapping(ctx context.Context, kube client.Client, op
 	if err != nil {
 		return err
 	}
-	if err := kubecli.Apply(ctx, kube, obj, applyOpts); err != nil {
+	if err := kubecli.Apply(ctx, dyn, authnServiceAccountGVR, obj, applyOpts); err != nil {
 		log.Error(err, "installing authn ServiceAccount mapping", "name", obj.GetName(), "namespace", obj.GetNamespace())
 		return fmt.Errorf("installing authn ServiceAccount mapping: %w", err)
 	}
@@ -120,7 +126,7 @@ func applyAuthnServiceAccountMapping(ctx context.Context, kube client.Client, op
 // and distinct from the "cdc-*" per-composition names). No-op when no apiRef is declared or the
 // self-identity is not configured (apiRefRBAC disabled). Deliberately NOT hashed into the deploy
 // digest: it is core-provider's singleton identity, not part of the per-composition resource set.
-func ensureSelfAuthnMapping(ctx context.Context, kube client.Client, opts DeployOptions, applyOpts kubecli.ApplyOptions) error {
+func ensureSelfAuthnMapping(ctx context.Context, dyn dynamic.Interface, opts DeployOptions, applyOpts kubecli.ApplyOptions) error {
 	if opts.ApiRefName == "" || opts.SelfSAName == "" {
 		return nil
 	}
@@ -148,7 +154,7 @@ func ensureSelfAuthnMapping(ctx context.Context, kube client.Client, opts Deploy
 	if err != nil {
 		return fmt.Errorf("rendering core-provider authn ServiceAccount mapping: %w", err)
 	}
-	if err := kubecli.Apply(ctx, kube, obj, applyOpts); err != nil {
+	if err := kubecli.Apply(ctx, dyn, authnServiceAccountGVR, obj, applyOpts); err != nil {
 		log.Error(err, "installing core-provider authn ServiceAccount mapping", "name", obj.GetName(), "namespace", obj.GetNamespace())
 		return fmt.Errorf("installing core-provider authn ServiceAccount mapping: %w", err)
 	}

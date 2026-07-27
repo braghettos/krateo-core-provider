@@ -533,7 +533,7 @@ func (e *external) pruneStaleServedVersions(ctx context.Context, gvk schema.Grou
 	if !crdutils.RemoveStaleVersions(crd, pruneSet) {
 		return nil
 	}
-	if err := kube.Apply(ctx, e.kube, crd, kube.ApplyOptions{}); err != nil {
+	if err := kube.Apply(ctx, e.dynamic, apiextensionsv1.SchemeGroupVersion.WithResource("customresourcedefinitions"), crd, kube.ApplyOptions{}); err != nil {
 		return fmt.Errorf("applying pruned CRD: %w", err)
 	}
 	e.log.Info("Pruned stale served versions from CRD", "gvr", gvr.String(), "pruned", prunable)
@@ -650,12 +650,12 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (reconciler
 	// Record where the controller is deployed and whether that cluster is reachable.
 	e.setTargetStatus(cr)
 
-	pkgInfo, dir, err := chart.ChartInfoFromSpec(ctx, e.mgmt, cr.Spec.Chart)
+	pkgInfo, dir, err := chart.ChartInfoFromSpec(ctx, e.mgmtDynamic, cr.Spec.Chart)
 	if err != nil {
 		return reconciler.ExternalObservation{}, fmt.Errorf("error getting chart info: %w", err)
 	}
 
-	pkg, err := chartfs.ForSpec(ctx, e.mgmt, cr.Spec.Chart)
+	pkg, err := chartfs.ForSpec(ctx, e.mgmtDynamic, cr.Spec.Chart)
 	if err != nil {
 		return reconciler.ExternalObservation{}, err
 	}
@@ -989,7 +989,7 @@ func (e *external) syncHubCompositionCRDVersions(ctx context.Context, spokeCRD *
 	// TypeMeta unset; kube.Apply derives the GVK from the object, so set it explicitly — mirroring
 	// crdclient.Get.
 	hubCRD.SetGroupVersionKind(apiextensionsv1.SchemeGroupVersion.WithKind("CustomResourceDefinition"))
-	if err := kube.Apply(ctx, e.mgmt, hubCRD, kube.ApplyOptions{}); err != nil {
+	if err := kube.Apply(ctx, e.mgmtDynamic, apiextensionsv1.SchemeGroupVersion.WithResource("customresourcedefinitions"), hubCRD, kube.ApplyOptions{}); err != nil {
 		return fmt.Errorf("applying hub composition CRD version sync: %w", err)
 	}
 	e.log.Info("Synced hub composition CRD served versions to spoke", "gvr", gr.String(), "pruned", pruned)
@@ -1007,7 +1007,7 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) error {
 
 	log.Info("Creating CompositionDefinition")
 
-	pkg, dir, err := chart.ChartInfoFromSpec(ctx, e.mgmt, cr.Spec.Chart)
+	pkg, dir, err := chart.ChartInfoFromSpec(ctx, e.mgmtDynamic, cr.Spec.Chart)
 	if err != nil {
 		return err
 	}
@@ -1107,7 +1107,7 @@ func (e *external) seedRemoteTargetIfNeeded(ctx context.Context, cr *composition
 	if !clusterkube.IsRemote(cr.Spec.Deploy) {
 		return nil
 	}
-	pkgFS, err := chartfs.ForSpec(ctx, e.mgmt, cr.Spec.Chart)
+	pkgFS, err := chartfs.ForSpec(ctx, e.mgmtDynamic, cr.Spec.Chart)
 	if err != nil {
 		return fmt.Errorf("loading chart for remote seed: %w", err)
 	}
@@ -1144,7 +1144,7 @@ func (e *external) seedRemoteTargetIfNeeded(ctx context.Context, cr *composition
 	if err != nil {
 		return fmt.Errorf("resolving chart-inspector coordinates for remote seed: %w", err)
 	}
-	if err := deploy.ProjectChartInspector(ctx, e.mgmt, e.kube, coords); err != nil {
+	if err := deploy.ProjectChartInspector(ctx, e.mgmt, e.kube, e.dynamic, coords); err != nil {
 		return fmt.Errorf("projecting chart-inspector to remote target: %w", err)
 	}
 	return nil
@@ -1183,11 +1183,11 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) error {
 
 	log.Info("Updating CompositionDefinition")
 
-	pkg, dir, err := chart.ChartInfoFromSpec(ctx, e.mgmt, cr.Spec.Chart)
+	pkg, dir, err := chart.ChartInfoFromSpec(ctx, e.mgmtDynamic, cr.Spec.Chart)
 	if err != nil {
 		return fmt.Errorf("error getting chart info: %w", err)
 	}
-	pkgFS, err := chartfs.ForSpec(ctx, e.mgmt, cr.Spec.Chart)
+	pkgFS, err := chartfs.ForSpec(ctx, e.mgmtDynamic, cr.Spec.Chart)
 	if err != nil {
 		return err
 	}
@@ -1410,7 +1410,7 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
 
 	cr.SetConditions(rtv1.Deleting())
 
-	pkg, dir, err := chart.ChartInfoFromSpec(ctx, e.mgmt, cr.Spec.Chart)
+	pkg, dir, err := chart.ChartInfoFromSpec(ctx, e.mgmtDynamic, cr.Spec.Chart)
 	if err != nil {
 		return fmt.Errorf("error getting chart info: %w", err)
 	}
@@ -1467,7 +1467,7 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
 
 			for i := range ul.Items {
 				log.Debug("Deleting composition", "name", ul.Items[i].GetName(), "namespace", ul.Items[i].GetNamespace())
-				err := kube.Uninstall(ctx, e.kube, &ul.Items[i], kube.UninstallOptions{})
+				err := kube.Uninstall(ctx, e.dynamic, gvr, &ul.Items[i], kube.UninstallOptions{})
 				if err != nil {
 					return err
 				}

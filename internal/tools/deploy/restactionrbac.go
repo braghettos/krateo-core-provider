@@ -8,14 +8,15 @@ import (
 
 	"github.com/krateoplatformops/core-provider/internal/tools/authn"
 	contexttools "github.com/krateoplatformops/core-provider/internal/tools/context"
-	hasher "github.com/krateoplatformops/plumbing/kubeutil/hasher"
 	kubecli "github.com/krateoplatformops/core-provider/internal/tools/kube"
 	"github.com/krateoplatformops/core-provider/internal/tools/restactionrbac"
+	hasher "github.com/krateoplatformops/plumbing/kubeutil/hasher"
 	"github.com/krateoplatformops/provider-runtime/pkg/logging"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/dynamic"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -105,7 +106,7 @@ func hashRestActionRBACObjects(cr *rbacv1.ClusterRole, crb *rbacv1.ClusterRoleBi
 // restactionrbac.ErrIncomplete (snowplow 422) so the caller sets ApiRefRBACIncomplete instead of
 // writing partial RBAC. In dry-run the apply is a server dry-run (applyOpts); the digest still
 // reflects the generated objects.
-func applyRestActionRBAC(ctx context.Context, kube client.Client, opts DeployOptions, saName string, hsh *hasher.ObjectHash, applyOpts kubecli.ApplyOptions) error {
+func applyRestActionRBAC(ctx context.Context, dyn dynamic.Interface, opts DeployOptions, saName string, hsh *hasher.ObjectHash, applyOpts kubecli.ApplyOptions) error {
 	if opts.ApiRefName == "" {
 		return nil
 	}
@@ -128,11 +129,11 @@ func applyRestActionRBAC(ctx context.Context, kube client.Client, opts DeployOpt
 
 	cr, crb := restactionrbac.GenerateClusterScoped(readSet, cdcGroup(saName), restActionRBACName(saName))
 
-	if err := kubecli.Apply(ctx, kube, cr, applyOpts); err != nil {
+	if err := kubecli.Apply(ctx, dyn, clusterRoleGVR, cr, applyOpts); err != nil {
 		log.Error(err, "installing apiRef ClusterRole", "name", cr.Name)
 		return fmt.Errorf("installing apiRef ClusterRole: %w", err)
 	}
-	if err := kubecli.Apply(ctx, kube, crb, applyOpts); err != nil {
+	if err := kubecli.Apply(ctx, dyn, clusterRoleBindingGVR, crb, applyOpts); err != nil {
 		log.Error(err, "installing apiRef ClusterRoleBinding", "name", crb.Name)
 		return fmt.Errorf("installing apiRef ClusterRoleBinding: %w", err)
 	}

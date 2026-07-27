@@ -2,107 +2,54 @@ package kube
 
 import (
 	"context"
-	"errors"
-	"time"
 
-	"github.com/krateoplatformops/core-provider/internal/tools/retry"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"github.com/krateoplatformops/plumbing/kubeutil/objectclient"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-const (
-	clientRetryAttempts     = 10
-	clientRetryInitialDelay = 100 * time.Millisecond
-	clientRetryMaximumDelay = 100 * time.Millisecond
-)
-
-// ApplyGenericObject applies a generic object to the cluster
-func Apply(ctx context.Context, kube client.Client, obj client.Object, opts ApplyOptions) error {
-	_, err := retry.Do[struct{}](ctx, retry.Config[struct{}]{
-		Attempts:     clientRetryAttempts,
-		InitialDelay: clientRetryInitialDelay,
-		MaximumDelay: clientRetryMaximumDelay,
-		Retryable:    isRetryableClientError,
-	}, func(context.Context) (struct{}, error) {
-		tmp := &unstructured.Unstructured{}
-		tmp.SetKind(obj.GetObjectKind().GroupVersionKind().Kind)
-		tmp.SetAPIVersion(obj.GetObjectKind().GroupVersionKind().GroupVersion().String())
-		err := kube.Get(ctx, client.ObjectKeyFromObject(obj), tmp)
-		if err != nil {
-			if apierrors.IsNotFound(err) {
-				createOpts := &client.CreateOptions{
-					DryRun:          opts.DryRun,
-					FieldManager:    opts.FieldManager,
-					FieldValidation: opts.FieldValidation,
-				}
-				return struct{}{}, kube.Create(ctx, obj, createOpts)
-			}
-			return struct{}{}, err
-		}
-
-		obj.SetResourceVersion(tmp.GetResourceVersion())
-		updateOpts := &client.UpdateOptions{
-			DryRun:          opts.DryRun,
-			FieldManager:    opts.FieldManager,
-			FieldValidation: opts.FieldValidation,
-		}
-		return struct{}{}, kube.Update(ctx, obj, updateOpts)
-	})
-	return err
-}
-
-func Uninstall(ctx context.Context, kube client.Client, obj client.Object, opts UninstallOptions) error {
-	_, err := retry.Do[struct{}](ctx, retry.Config[struct{}]{
-		Attempts:     clientRetryAttempts,
-		InitialDelay: clientRetryInitialDelay,
-		MaximumDelay: clientRetryMaximumDelay,
-		Retryable:    isRetryableClientError,
-	}, func(context.Context) (struct{}, error) {
-		tmp := &unstructured.Unstructured{}
-		tmp.SetKind(obj.GetObjectKind().GroupVersionKind().Kind)
-		tmp.SetAPIVersion(obj.GetObjectKind().GroupVersionKind().GroupVersion().String())
-		err := kube.Get(ctx, client.ObjectKeyFromObject(obj), tmp)
-		if err != nil {
-			if apierrors.IsNotFound(err) {
-				return struct{}{}, nil
-			}
-
-			return struct{}{}, err
-		}
-
-		obj.SetResourceVersion(tmp.GetResourceVersion())
-
-		err = kube.Delete(ctx, obj, &client.DeleteOptions{
-			DryRun:             opts.DryRun,
-			Preconditions:      opts.Preconditions,
-			PropagationPolicy:  opts.PropagationPolicy,
-			GracePeriodSeconds: opts.GracePeriodSeconds,
-		})
-		if err != nil {
-			if apierrors.IsNotFound(err) {
-				return struct{}{}, nil
-			}
-
-			return struct{}{}, err
-		}
-		return struct{}{}, nil
-	})
-	return err
-}
-
-func Get(ctx context.Context, kube client.Client, obj client.Object) error {
-	return kube.Get(ctx, client.ObjectKeyFromObject(obj), obj)
-}
-
-func isRetryableClientError(err error) bool {
-	if err == nil {
-		return false
+// Apply creates obj if no object with its namespace/name exists yet, or updates it (carrying over the
+// current resourceVersion) if one does, then copies the server's response back into obj. A thin,
+// typed-object wrapper over plumbing/kubeutil/objectclient (which retries internally on any transient
+// error): obj's GroupVersionKind must be set (as it already is for objects rendered from a YAML template,
+// or built as a Go struct literal with TypeMeta set explicitly) since gvr cannot be inferred from a
+// dynamic-client call the way client.Client's REST mapper would.
+func Apply(ctx context.Context, dyn dynamic.Interface, gvr schema.GroupVersionResource, obj client.Object, opts ApplyOptions) error {
+	u, err := toUnstructured(obj)
+	if err != nil {
+		return err
 	}
-
-	if errors.Is(err, context.Canceled) {
-		return false
+	if err := objectclient.Apply(ctx, dyn, gvr, u, opts); err != nil {
+		return err
 	}
+	return fromUnstructured(u, obj)
+}
 
-	return true
+// Uninstall deletes obj by namespace/name. IsNotFound-tolerant (via objectclient.Uninstall).
+func Uninstall(ctx context.Context, dyn dynamic.Interface, gvr schema.GroupVersionResource, obj client.Object, opts UninstallOptions) error {
+	return objectclient.Uninstall(ctx, dyn, gvr, obj.GetNamespace(), obj.GetName(), opts)
+}
+
+// Get reads obj by namespace/name, populating it in place.
+func Get(ctx context.Context, dyn dynamic.Interface, gvr schema.GroupVersionResource, obj client.Object) error {
+	u, err := objectclient.Get(ctx, dyn, gvr, obj.GetNamespace(), obj.GetName())
+	if err != nil {
+		return err
+	}
+	return fromUnstructured(u, obj)
+}
+
+func toUnstructured(obj client.Object) (*unstructured.Unstructured, error) {
+	raw, err := runtime.DefaultUnstructuredConverter.ToUnstructured(obj)
+	if err != nil {
+		return nil, err
+	}
+	return &unstructured.Unstructured{Object: raw}, nil
+}
+
+func fromUnstructured(u *unstructured.Unstructured, obj client.Object) error {
+	return runtime.DefaultUnstructuredConverter.FromUnstructured(u.Object, obj)
 }
