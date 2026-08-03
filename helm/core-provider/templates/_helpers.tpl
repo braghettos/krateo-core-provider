@@ -113,5 +113,9 @@ Usage:
 {{- $g := .global | default dict -}}
 {{- $registry := $g.imageRegistry | default .img.registry -}}
 {{- $tag := .img.tag | default .defaultTag -}}
+{{- if $registry -}}
 {{- printf "%s/%s:%s" $registry .img.repository $tag -}}
+{{- else -}}
+{{- printf "%s:%s" .img.repository $tag -}}
+{{- end -}}
 {{- end -}}
