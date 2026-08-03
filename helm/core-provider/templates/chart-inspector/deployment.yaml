@@ -33,7 +33,7 @@ spec:
         {{- toYaml .Values.chartInspector.podSecurityContext | nindent 8 }}
       containers:
         - name: {{ include "chart-inspector.fullname" . }}
-          image: "{{ .Values.chartInspector.image.repository }}:{{ .Values.chartInspector.image.tag | default .Chart.AppVersion }}"
+          image: {{ include "krateo.image" (dict "img" .Values.chartInspector.image "global" .Values.global "defaultTag" .Chart.AppVersion) | quote }}
           imagePullPolicy: {{ .Values.chartInspector.image.pullPolicy }}
           envFrom:
             - configMapRef:

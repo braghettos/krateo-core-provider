@@ -99,3 +99,19 @@ app.kubernetes.io/instance: {{ .Release.Name }}-chart-inspector
 {{- default "default" .Values.serviceAccount.name }}
 {{- end }}
 {{- end }}
+
+{{/*
+Fully-qualified image reference, honoring an optional global.imageRegistry override.
+The registry host (.img.registry) is replaced by .Values.global.imageRegistry when that is set, so
+a single value relocates EVERY image for a mirror / air-gapped install. Repository paths are
+preserved, matching how registry replication mirrors by default. Canonical helper — identical
+across all Krateo charts (shipped from the shared chart scaffold).
+Usage:
+  image: {{ include "krateo.image" (dict "img" .Values.image "global" .Values.global "defaultTag" .Chart.AppVersion) | quote }}
+*/}}
+{{- define "krateo.image" -}}
+{{- $g := .global | default dict -}}
+{{- $registry := $g.imageRegistry | default .img.registry -}}
+{{- $tag := .img.tag | default .defaultTag -}}
+{{- printf "%s/%s:%s" $registry .img.repository $tag -}}
+{{- end -}}

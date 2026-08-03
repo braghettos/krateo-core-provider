@@ -15,10 +15,16 @@
       "title": "Image",
       "additionalProperties": false,
       "properties": {
+        "registry": {
+          "type": "string",
+          "title": "Image registry host",
+          "description": "Registry host for this image. Overridden by global.imageRegistry when that is set.",
+          "default": "ghcr.io"
+        },
         "repository": {
           "type": "string",
           "title": "Image repository",
-          "default": "ghcr.io/krateoplatformops/core-provider"
+          "default": "krateoplatformops/core-provider"
         },
         "pullPolicy": {
           "type": "string",
@@ -326,10 +332,16 @@
           "title": "Chart inspector image",
           "additionalProperties": false,
           "properties": {
+            "registry": {
+              "type": "string",
+              "title": "Image registry host",
+              "description": "Registry host for this image. Overridden by global.imageRegistry when that is set.",
+              "default": "ghcr.io"
+            },
             "repository": {
               "type": "string",
               "title": "Image repository",
-              "default": "ghcr.io/krateoplatformops/chart-inspector"
+              "default": "krateoplatformops/chart-inspector"
             },
             "pullPolicy": {
               "type": "string",
@@ -518,10 +530,16 @@
           "title": "CDC image",
           "additionalProperties": false,
           "properties": {
+            "registry": {
+              "type": "string",
+              "title": "Image registry host",
+              "description": "Registry host for this image. Overridden by global.imageRegistry when that is set.",
+              "default": "ghcr.io"
+            },
             "repository": {
               "type": "string",
               "title": "Image repository",
-              "default": "ghcr.io/krateoplatformops/composition-dynamic-controller"
+              "default": "krateoplatformops/composition-dynamic-controller"
             },
             "pullPolicy": {
               "type": "string",
@@ -553,7 +571,7 @@
         },
         "resyncInterval": {
           "type": "string",
-          "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
+          "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|\u00b5s|ms|s|m|h))+$",
           "title": "Fleet-wide default CDC resync interval e.g. 10m; per-Kind spec.controller.resyncInterval overrides"
         },
         "imagePullSecrets": {
@@ -745,7 +763,15 @@
     "global": {
       "type": "object",
       "title": "Global values",
-      "description": "Helm global values (injected when this chart is used as a subchart)."
+      "description": "Helm global values (injected when this chart is used as a subchart).",
+      "properties": {
+        "imageRegistry": {
+          "type": "string",
+          "title": "Global image registry override",
+          "description": "When set, replaces the registry host of every image in the chart (mirror / air-gapped installs). Repository paths are preserved.",
+          "default": ""
+        }
+      }
     },
     "livenessProbe": {
       "type": "object",
