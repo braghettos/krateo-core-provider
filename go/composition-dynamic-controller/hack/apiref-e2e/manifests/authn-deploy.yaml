@@ -1,0 +1,88 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: demo-system
+---
+kind: ServiceAccount
+apiVersion: v1
+metadata:
+  name: authn
+  namespace: demo-system
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: authn
+  namespace: demo-system
+spec:
+  selector:
+    app: authn
+  type: NodePort
+  ports:
+  - name: http
+    port: 8082
+    targetPort: http
+    protocol: TCP
+    nodePort: 30082
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: secrets-admin
+  namespace: demo-system
+rules:
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: secrets-admin-binding
+  namespace: demo-system
+subjects:
+- kind: ServiceAccount
+  name: authn
+  namespace: demo-system
+roleRef:
+  kind: Role
+  name: secrets-admin
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: authn
+  namespace: demo-system
+  labels:
+    app: authn
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: authn
+  template:
+    metadata:
+      labels:
+        app: authn
+    spec:
+      serviceAccountName: authn
+      containers:
+      - name: authn
+        image: authn:e2e
+        imagePullPolicy: Never
+        args:
+          - --debug=true
+          - --kubeconfig-server-url=https://kubernetes.default.svc
+          - --namespace=demo-system
+          - --jwt-sign-key=AbbraCadabbra
+          - --serviceaccount-audience=authn
+        ports:
+        - name: http
+          containerPort: 8082

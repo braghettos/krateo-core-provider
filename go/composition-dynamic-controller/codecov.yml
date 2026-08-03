@@ -1,0 +1,7 @@
+# sample regex patterns
+ignore:
+  - "internal/composition"
+  - "internal/controller"
+  - "apis"
+  - "main.go"
+  - "internal/tools/deployment/crd.go" # Cannot Install CRD in fake client, timeout error

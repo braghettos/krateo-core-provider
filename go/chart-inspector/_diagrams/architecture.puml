@@ -1,0 +1,28 @@
+@startuml
+ 
+package chart-inspector {
+  package API {
+    component "/resources" as resources
+  }
+
+  package Tracer {
+    component "roundtripper" as tracer
+  }
+
+  
+
+}
+
+package helm-library {
+    package Actions {
+        component "template" as template
+        component "..." as others
+    }
+}
+
+resources -.r- tracer
+tracer -r-> template
+tracer -l-> resources
+
+
+@enduml

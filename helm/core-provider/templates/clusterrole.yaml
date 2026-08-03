@@ -1,0 +1,119 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "core-provider.fullname" . }}-{{ .Release.Namespace }}
+rules:
+- apiGroups:
+  - core.krateo.io
+  resources:
+  - compositiondefinitions
+  - compositiondefinitions/status
+  - schemadefinitions
+  - schemadefinitions/status
+  - kubernetestargets
+  # /status is a SEPARATE grant: the KubernetesTarget reachability reconciler writes it, and the
+  # RemoteInstall controller manages remoteinstalls (+ status) — one declarative install-on-spoke.
+  - kubernetestargets/status
+  - remoteinstalls
+  - remoteinstalls/status
+  verbs:
+  - '*'
+- apiGroups:
+  - apiextensions.k8s.io
+  resources:
+  - customresourcedefinitions
+  # The /status subresource is a SEPARATE RBAC grant ('*' on the parent does not cover it). Needed so
+  # the served-version prune (#103) can trim status.storedVersions before removing a version from
+  # spec.versions (the apiserver forbids dropping a still-stored version otherwise).
+  - customresourcedefinitions/status
+  verbs:
+  - '*'
+- apiGroups:
+  - apps
+  resources:
+  - deployments
+  verbs:
+  - '*'
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
+  - roles
+  - rolebindings
+  - clusterroles
+  - clusterrolebindings
+  verbs:
+  - '*'
+- apiGroups:
+  - ""
+  resources:
+  - serviceaccounts
+  verbs:
+  - '*'
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+  - update
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - "composition.krateo.io"
+  resources:
+  - "*"
+  verbs:
+  - "*"
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  verbs:
+  - "*"
+- apiGroups:
+  - ""
+  resources:
+  - services
+  verbs:
+  - "*"
+- apiGroups: ["events.k8s.io"]
+  resources: ["events"]
+  verbs: ["create", "patch", "update"]
+# Manage the authn allowlist mapping for compositions that declare an apiRef, so the CDC
+# ServiceAccount may exchange its projected token for a service JWT (created in the authn
+# operator namespace on deploy, removed on undeploy).
+- apiGroups:
+  - serviceaccount.authn.krateo.io
+  resources:
+  - serviceaccounts
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+{{- if .Values.leaderElection.enabled }}
+# Leader election (replicaCount>=2): the controller-runtime manager holds a coordination.k8s.io
+# Lease so only one replica reconciles at a time.
+- apiGroups:
+  - coordination.k8s.io
+  resources:
+  - leases
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+{{- end }}

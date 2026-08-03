@@ -1,0 +1,8 @@
+# Source: core-provider/templates/configmap-cdc.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "core-provider.fullname" . }}-jsonschema-configmap
+data:
+  configmap.yaml: |-
+{{ tpl (.Files.Get "assets/jsonSchemaConfigmap.yaml") . | indent 4 }}

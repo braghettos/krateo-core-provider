@@ -1,0 +1,36 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: csr-admin
+rules:
+- apiGroups: ["certificates.k8s.io"]
+  resources: ["certificatesigningrequests"]
+  verbs: ["create", "get", "list", "watch", "approve", "delete", "update"]
+- apiGroups: ["certificates.k8s.io"]
+  resources: ["certificatesigningrequests/approval"]
+  verbs: ["update"]
+- apiGroups: ["certificates.k8s.io"]
+  resources: ["signers"]
+  resourceNames: ["kubernetes.io/kube-apiserver-client"]
+  verbs: ["approve"]
+# Kubernetes intra-service auth (/serviceaccount/login): validate caller SA tokens.
+- apiGroups: ["authentication.k8s.io"]
+  resources: ["tokenreviews"]
+  verbs: ["create"]
+# Resolve the ServiceAccount allowlist mapping for the presented SA.
+- apiGroups: ["serviceaccount.authn.krateo.io"]
+  resources: ["serviceaccounts"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: csr-admin-binding
+subjects:
+- kind: ServiceAccount
+  name: authn
+  namespace: demo-system
+roleRef:
+  kind: ClusterRole
+  name: csr-admin
+  apiGroup: rbac.authorization.k8s.io

@@ -1,0 +1,15 @@
+apiVersion: core.krateo.io/v1alpha1
+kind: CompositionDefinition
+metadata:
+  annotations:
+     "krateo.io/connector-verbose": "true"
+  name: focus-data-presentation-azure
+  namespace: demo-system
+spec:
+  chart:
+    repo: focus-data-presentation-azure
+    url: https://charts.krateo.io
+    version: "0.1.0"
+status:
+  apiVersion: composition.krateo.io/v0-1-0
+  kind: FocusDataPresentationAzure

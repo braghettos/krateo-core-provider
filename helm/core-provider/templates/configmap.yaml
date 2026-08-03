@@ -1,0 +1,37 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "core-provider.fullname" . }}
+  labels:
+    {{- include "core-provider.labels" . | nindent 4 }}
+data:
+  {{- if .Values.otel.enabled }}
+  OTEL_ENABLED: "true"
+  OTEL_TRACING_ENABLED: "{{ .Values.otel.tracing }}"
+  OTEL_EXPORTER_OTLP_ENDPOINT: {{ .Values.otel.endpoint | default (printf "http://otel-collector-daemonset-opentelemetry-collector.%s.svc:4318" .Release.Namespace) | quote }}
+  OTEL_EXPORTER_OTLP_PROTOCOL: {{ .Values.otel.protocol | default "http/protobuf" | quote }}
+  SERVICE_VERSION: {{ .Chart.AppVersion | quote }}
+  {{- end }}
+  {{- range $key, $value := .Values.env }}
+  {{ $key }}: {{ $value | quote }}
+  {{- end }}
+  {{- if .Values.leaderElection.enabled }}
+  # Required for replicaCount>=2: active-passive HA via a coordination.k8s.io Lease. Without it,
+  # multiple replicas double-reconcile. The Lease RBAC is granted in clusterrole.yaml when on.
+  CORE_PROVIDER_LEADER_ELECTION: "true"
+  {{- end }}
+  {{- if .Values.apiRefRBAC.enabled }}
+  # apiRef RESTAction RBAC: core-provider calls snowplow's /rbac (authenticated via authn) to
+  # enumerate the reads a referenced RESTAction performs and grants them to the per-composition
+  # group. See krateo-platformops/core-provider docs/design/apiref-rbac-generation.md.
+  CORE_PROVIDER_SNOWPLOW_URL: {{ .Values.apiRefRBAC.snowplowUrl | default (printf "http://snowplow.%s.svc.cluster.local:8081" .Release.Namespace) | quote }}
+  CORE_PROVIDER_AUTHN_URL: {{ .Values.apiRefRBAC.authnUrl | default (printf "http://authn.%s.svc.cluster.local:8082" .Release.Namespace) | quote }}
+  # Self-identity for core-provider's OWN authn allowlist mapping. core-provider provisions this
+  # mapping at RUNTIME (the first time a composition declares an apiRef, when authn is up) instead
+  # of a declarative CR here — the serviceaccount.authn.krateo.io CRD is installed later (as a
+  # component), so a bootstrap-time CR could not be applied.
+  CORE_PROVIDER_APIREF_SELF_SA_NAME: {{ include "core-provider.serviceAccountName" . | quote }}
+  CORE_PROVIDER_APIREF_SELF_SA_NAMESPACE: {{ .Release.Namespace | quote }}
+  CORE_PROVIDER_APIREF_GROUP: {{ .Values.apiRefRBAC.group | quote }}
+  COMPOSITION_AUTHN_NAMESPACE: {{ .Values.apiRefRBAC.authnNamespace | default .Release.Namespace | quote }}
+  {{- end }}

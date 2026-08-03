@@ -1,0 +1,41 @@
+{{/*
+Stamps each composition instance with the served version it was written through
+(label krateo.io/composition-version), consumed by core-provider for per-version
+listing/migration. In-apiserver (CEL) replacement for the former /mutate admission
+webhook - no webhook server, serving cert, or MutatingWebhookConfiguration.
+
+Requires the GA MutatingAdmissionPolicy API (admissionregistration.k8s.io/v1),
+available from Kubernetes 1.36. NOTE: for remote deployment targets the same policy
+must also exist in each target cluster (compositions are created there).
+
+The name is the FIXED cluster-wide singleton "krateo-composition-version" — NOT
+release-prefixed — so it matches the name core-provider's binary projects into remote
+targets (policy.PolicyName) and the target-chart. A single source of truth; one policy
+per cluster. (On upgrade from a release-prefixed name, helm replaces the old object.)
+*/}}
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingAdmissionPolicy
+metadata:
+  name: krateo-composition-version
+spec:
+  matchConstraints:
+    matchPolicy: Exact
+    resourceRules:
+    - apiGroups: ["composition.krateo.io"]
+      apiVersions: ["*"]
+      operations: ["CREATE", "UPDATE"]
+      resources: ["*"]
+  failurePolicy: Fail
+  reinvocationPolicy: Never
+  mutations:
+    - patchType: ApplyConfiguration
+      applyConfiguration:
+        expression: >
+          Object{ metadata: Object.metadata{ labels: {"krateo.io/composition-version": request.requestKind.version} } }
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingAdmissionPolicyBinding
+metadata:
+  name: krateo-composition-version
+spec:
+  policyName: krateo-composition-version

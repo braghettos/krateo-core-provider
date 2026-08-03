@@ -1,0 +1,18 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ include "core-provider.fullname" . }}-compositions-max-name-length-policy
+spec:
+  matchConstraints:
+    resourceRules:
+    - apiGroups: ["composition.krateo.io"]
+      apiVersions: ["*"]
+      operations: ["CREATE"]
+      resources: ["*"]
+  matchConditions:
+    - name: "label-release-name-not-empty"
+      expression: "!('krateo.io/release-name' in object.metadata.labels)"
+
+  validations:
+    - expression: "object.metadata.name.size() <= 44"
+      message: "The name of the resource must not exceed 44 characters."

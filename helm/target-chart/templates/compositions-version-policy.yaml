@@ -1,0 +1,37 @@
+{{/*
+Composition-version MutatingAdmissionPolicy for a remote deployment target.
+
+A remote target runs the generated composition CRDs (installed by core-provider from the
+management cluster) and the composition instances created against them. This policy stamps
+each instance with the served version it was written through
+(label krateo.io/composition-version), which core-provider relies on for per-version
+listing and migration. Install this chart into every cluster used as a core-provider
+remote target. Identical to the policy the deployment chart installs in the management
+cluster. Requires the GA MutatingAdmissionPolicy API (Kubernetes >= 1.36).
+*/}}
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingAdmissionPolicy
+metadata:
+  name: krateo-composition-version
+spec:
+  matchConstraints:
+    matchPolicy: Exact
+    resourceRules:
+    - apiGroups: ["composition.krateo.io"]
+      apiVersions: ["*"]
+      operations: ["CREATE", "UPDATE"]
+      resources: ["*"]
+  failurePolicy: Fail
+  reinvocationPolicy: Never
+  mutations:
+    - patchType: ApplyConfiguration
+      applyConfiguration:
+        expression: >
+          Object{ metadata: Object.metadata{ labels: {"krateo.io/composition-version": request.requestKind.version} } }
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingAdmissionPolicyBinding
+metadata:
+  name: krateo-composition-version
+spec:
+  policyName: krateo-composition-version

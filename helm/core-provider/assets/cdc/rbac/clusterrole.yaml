@@ -1,0 +1,41 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{`{{ .resource }}`}}-{{`{{ .apiVersion }}`}}
+rules:
+- apiGroups: ["apiextensions.k8s.io"]
+  resources: ["customresourcedefinitions"]
+  # watch added for cdc >= 1.0.3: the controller watches CRD events to auto-invalidate its
+  # discovery cache (krateo-composition-dynamic-controller#2), removing the manual-restart nudge.
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["composition.krateo.io"]
+  resources: ["*"]
+  verbs: ["*"]
+- apiGroups: ["rbac.authorization.k8s.io"]
+  resources: ["roles", "rolebindings", "clusterroles", "clusterrolebindings"]
+  verbs: ["*"]
+- apiGroups: [""]
+  resources: ["namespaces"]
+  verbs: ["get", "list", "watch", "create", "update", "patch"]
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "list", "create", "delete", "update"]
+# Read-only, and required by RENDERING rather than by anything the CDC manages: a blueprint may call
+# Helm's `lookup "v1" "Service" ...` (the umbrella does, to discover the ingress LB IP), and that lookup
+# runs under this ServiceAccount during the observe dry-run. Without it the render fails with
+# `services is forbidden` and the composition wedges at Synced=False — seen live on the
+# 0.2.219 -> 0.2.220 deploy (krateo-installer#148). Note the general shape: a template can look up ANY
+# kind, so a blueprint reaching for one not granted here will fail the same way. Grants are added on
+# evidence rather than pre-emptively, to keep this cluster-scoped role least-privilege.
+- apiGroups: [""]
+  resources: ["services"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["core.krateo.io"]
+  resources: ["compositiondefinitions", "compositiondefinitions/status"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["events.k8s.io"]
+  resources: ["events"]
+  verbs: ["create", "patch", "update"]
+- apiGroups: [""]
+  resources: ["events"]
+  verbs: ["create", "patch", "update"]

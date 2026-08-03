@@ -1,0 +1,74 @@
+# Component-specific companion to the canonical release-tag.yaml. On a release tag, after the
+# multi-platform image is published, open a PR into the consuming chart (core-provider-chart)
+# bumping cdc.image.tag to the released tag — so the chart deploys the just-released CDC
+# instead of the previously pinned version.
+#
+# This lives in its own file ON PURPOSE: release-tag.yaml is byte-for-byte identical across
+# all component repos, so a CDC-specific bump must NOT be inlined there (it would be clobbered
+# on the next canonical sync). Triggered by the same tag push, so it is "wired into" the
+# release in effect, without mutating the shared workflow.
+name: bump-consumer-chart-image
+
+on:
+  push:
+    tags: ["[0-9]+.[0-9]+.[0-9]+"]
+
+jobs:
+  bump:
+    name: Bump cdc.image.tag in core-provider-chart
+    runs-on: ubuntu-latest
+    steps:
+      # Needed to regenerate the chart's cdc-runtime-template golden (helm template) below.
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.19.0
+      - name: Open chart image-tag bump PR
+        env:
+          GH_TOKEN: ${{ secrets.PAT }}
+        run: |
+          set -eo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          TARGET_REPO="braghettos/core-provider-chart"
+          BRANCH="cdc-image-${TAG}"
+          echo "Aligning ${TARGET_REPO} cdc.image.tag -> ${TAG}"
+
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+          gh repo clone "$TARGET_REPO" /tmp/chart
+          cd /tmp/chart
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${TARGET_REPO}.git"
+          git fetch origin && git checkout main && git pull origin main
+
+          # Idempotent in-place set of the pinned CDC image tag.
+          yq -i ".cdc.image.tag = \"${TAG}\"" chart/values.yaml
+
+          # The cdc-runtime-template golden snapshots the CDC image tag, so a tag-only bump would
+          # fail the chart's cdc-template check and the PR would be closed unmerged. Regenerate the
+          # golden alongside the bump so the PR lands green and mergeable.
+          if [ -f hack/verify-cdc-template.sh ]; then
+            ./hack/verify-cdc-template.sh --update
+          fi
+
+          if git diff --quiet; then
+            echo "chart cdc.image.tag already ${TAG} — nothing to do."
+            exit 0
+          fi
+
+          git checkout -b "$BRANCH" 2>/dev/null || { git push origin --delete "$BRANCH" 2>/dev/null || true; git checkout -b "$BRANCH"; }
+          git add -A
+          git commit -m "chore(cdc): bump composition-dynamic-controller image to ${TAG}
+
+          Automated by the composition-dynamic-controller release (${TAG}): aligns the chart's
+          pinned CDC image so it deploys the just-released controller."
+          git push origin "$BRANCH"
+
+          PR_TITLE="chore(cdc): bump composition-dynamic-controller image to ${TAG}"
+          PR_BODY="Automated on the CDC \`${TAG}\` release: aligns \`cdc.image.tag\` in \`chart/values.yaml\` (and refreshes the \`cdc-runtime-template\` golden) so the chart deploys the just-released controller."
+          PR_STATE=$(gh pr view "$BRANCH" --repo "$TARGET_REPO" --json state -q .state 2>/dev/null || echo "NONE")
+          if [ "$PR_STATE" = "OPEN" ]; then
+            echo "PR already open for $BRANCH."
+          else
+            gh pr create --title "$PR_TITLE" --body "$PR_BODY" --head "$BRANCH" --base main --repo "$TARGET_REPO"
+          fi

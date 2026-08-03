@@ -1,0 +1,818 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema",
+  "type": "object",
+  "title": "CoreProvider",
+  "description": "Full-coverage values schema for the Krateo core-provider chart, pinned to installer 2.7.0 / chart 0.35.2 (appVersion 0.26.1).",
+  "additionalProperties": false,
+  "properties": {
+    "replicaCount": {
+      "type": "integer",
+      "title": "Replica count",
+      "default": 1
+    },
+    "image": {
+      "type": "object",
+      "title": "Image",
+      "additionalProperties": false,
+      "properties": {
+        "repository": {
+          "type": "string",
+          "title": "Image repository",
+          "default": "ghcr.io/krateoplatformops/core-provider"
+        },
+        "pullPolicy": {
+          "type": "string",
+          "title": "Image pull policy",
+          "enum": [
+            "IfNotPresent",
+            "Always",
+            "Never"
+          ],
+          "default": "IfNotPresent"
+        },
+        "tag": {
+          "type": "string",
+          "title": "Image tag",
+          "description": "Overrides the image tag whose default is the chart appVersion.",
+          "default": ""
+        }
+      }
+    },
+    "imagePullSecrets": {
+      "type": "array",
+      "title": "Image pull secrets",
+      "default": [],
+      "items": {
+        "type": "object"
+      }
+    },
+    "nameOverride": {
+      "type": "string",
+      "title": "Name override",
+      "default": ""
+    },
+    "fullnameOverride": {
+      "type": "string",
+      "title": "Fullname override",
+      "default": ""
+    },
+    "serviceAccount": {
+      "type": "object",
+      "title": "Service account",
+      "additionalProperties": false,
+      "properties": {
+        "create": {
+          "type": "boolean",
+          "title": "Create service account",
+          "default": true
+        },
+        "automount": {
+          "type": "boolean",
+          "title": "Automount service account token",
+          "default": true
+        },
+        "annotations": {
+          "type": "object",
+          "title": "Service account annotations",
+          "default": {}
+        },
+        "name": {
+          "type": "string",
+          "title": "Service account name",
+          "default": ""
+        }
+      }
+    },
+    "podAnnotations": {
+      "type": "object",
+      "title": "Pod annotations",
+      "default": {}
+    },
+    "podLabels": {
+      "type": "object",
+      "title": "Pod labels",
+      "default": {}
+    },
+    "podSecurityContext": {
+      "type": "object",
+      "title": "Pod security context",
+      "default": {}
+    },
+    "securityContext": {
+      "type": "object",
+      "title": "Container security context",
+      "default": {}
+    },
+    "service": {
+      "type": "object",
+      "title": "Service",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "type": "string",
+          "title": "Service type",
+          "enum": [
+            "ClusterIP",
+            "NodePort",
+            "LoadBalancer"
+          ],
+          "default": "ClusterIP"
+        },
+        "port": {
+          "type": "integer",
+          "title": "Service port",
+          "default": 80
+        }
+      }
+    },
+    "ingress": {
+      "type": "object",
+      "title": "Ingress",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "title": "Enable ingress",
+          "default": false
+        },
+        "className": {
+          "type": "string",
+          "title": "Ingress class name",
+          "default": ""
+        },
+        "annotations": {
+          "type": "object",
+          "title": "Ingress annotations",
+          "default": {}
+        },
+        "hosts": {
+          "type": "array",
+          "title": "Ingress hosts",
+          "items": {
+            "type": "object",
+            "properties": {
+              "host": {
+                "type": "string"
+              },
+              "paths": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "path": {
+                      "type": "string"
+                    },
+                    "pathType": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": [
+            {
+              "host": "chart-example.local",
+              "paths": [
+                {
+                  "path": "/",
+                  "pathType": "ImplementationSpecific"
+                }
+              ]
+            }
+          ]
+        },
+        "tls": {
+          "type": "array",
+          "title": "Ingress TLS",
+          "default": [],
+          "items": {
+            "type": "object"
+          }
+        }
+      }
+    },
+    "resources": {
+      "type": "object",
+      "title": "Resources",
+      "default": {}
+    },
+    "autoscaling": {
+      "type": "object",
+      "title": "Autoscaling",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "title": "Enable autoscaling",
+          "default": false
+        },
+        "minReplicas": {
+          "type": "integer",
+          "title": "Minimum replicas",
+          "default": 1
+        },
+        "maxReplicas": {
+          "type": "integer",
+          "title": "Maximum replicas",
+          "default": 100
+        },
+        "targetCPUUtilizationPercentage": {
+          "type": "integer",
+          "title": "Target CPU utilization percentage",
+          "default": 80
+        },
+        "targetMemoryUtilizationPercentage": {
+          "type": "integer",
+          "title": "Target memory utilization percentage"
+        }
+      }
+    },
+    "volumes": {
+      "type": "array",
+      "title": "Additional volumes",
+      "default": [],
+      "items": {
+        "type": "object"
+      }
+    },
+    "volumeMounts": {
+      "type": "array",
+      "title": "Additional volume mounts",
+      "default": [],
+      "items": {
+        "type": "object"
+      }
+    },
+    "nodeSelector": {
+      "type": "object",
+      "title": "Node selector",
+      "default": {}
+    },
+    "tolerations": {
+      "type": "array",
+      "title": "Tolerations",
+      "default": [],
+      "items": {
+        "type": "object"
+      }
+    },
+    "affinity": {
+      "type": "object",
+      "title": "Affinity",
+      "default": {}
+    },
+    "env": {
+      "type": "object",
+      "title": "Environment variables",
+      "additionalProperties": {
+        "type": "string"
+      },
+      "properties": {
+        "CORE_PROVIDER_DEBUG": {
+          "type": "string",
+          "title": "Core provider debug",
+          "default": "false"
+        }
+      },
+      "default": {
+        "CORE_PROVIDER_DEBUG": "false"
+      }
+    },
+    "apiRefRBAC": {
+      "type": "object",
+      "title": "apiRef RESTAction RBAC auto-generation",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "snowplowUrl": {
+          "type": "string",
+          "title": "Snowplow base URL"
+        },
+        "authnUrl": {
+          "type": "string",
+          "title": "Authn base URL"
+        },
+        "authnNamespace": {
+          "type": "string",
+          "title": "Authn operator namespace",
+          "default": ""
+        },
+        "group": {
+          "type": "string",
+          "title": "Issued identity group",
+          "default": "krateo:core-provider"
+        },
+        "tokenAudience": {
+          "type": "string",
+          "default": "authn"
+        },
+        "tokenExpirationSeconds": {
+          "type": "integer",
+          "default": 3600
+        }
+      }
+    },
+    "chartInspector": {
+      "type": "object",
+      "title": "Chart inspector",
+      "additionalProperties": false,
+      "properties": {
+        "image": {
+          "type": "object",
+          "title": "Chart inspector image",
+          "additionalProperties": false,
+          "properties": {
+            "repository": {
+              "type": "string",
+              "title": "Image repository",
+              "default": "ghcr.io/krateoplatformops/chart-inspector"
+            },
+            "pullPolicy": {
+              "type": "string",
+              "title": "Image pull policy",
+              "enum": [
+                "IfNotPresent",
+                "Always",
+                "Never"
+              ],
+              "default": "IfNotPresent"
+            },
+            "tag": {
+              "type": "string",
+              "title": "Image tag",
+              "default": "0.2.0"
+            }
+          }
+        },
+        "replicaCount": {
+          "type": "integer",
+          "title": "Replica count",
+          "default": 1
+        },
+        "imagePullSecrets": {
+          "type": "array",
+          "title": "Image pull secrets",
+          "default": [],
+          "items": {
+            "type": "object"
+          }
+        },
+        "nameOverride": {
+          "type": "string",
+          "title": "Name override",
+          "default": ""
+        },
+        "fullnameOverride": {
+          "type": "string",
+          "title": "Fullname override",
+          "default": ""
+        },
+        "autoscaling": {
+          "type": "object",
+          "title": "Autoscaling",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "title": "Enable autoscaling",
+              "default": false
+            },
+            "minReplicas": {
+              "type": "integer",
+              "title": "Minimum replicas",
+              "default": 1
+            },
+            "maxReplicas": {
+              "type": "integer",
+              "title": "Maximum replicas",
+              "default": 100
+            },
+            "targetCPUUtilizationPercentage": {
+              "type": "integer",
+              "title": "Target CPU utilization percentage",
+              "default": 80
+            },
+            "targetMemoryUtilizationPercentage": {
+              "type": "integer",
+              "title": "Target memory utilization percentage"
+            }
+          }
+        },
+        "serviceAccount": {
+          "type": "object",
+          "title": "Service account",
+          "additionalProperties": false,
+          "properties": {
+            "create": {
+              "type": "boolean",
+              "title": "Create service account",
+              "default": true
+            },
+            "automount": {
+              "type": "boolean",
+              "title": "Automount service account token",
+              "default": true
+            },
+            "annotations": {
+              "type": "object",
+              "title": "Service account annotations",
+              "default": {}
+            },
+            "name": {
+              "type": "string",
+              "title": "Service account name",
+              "default": ""
+            }
+          }
+        },
+        "service": {
+          "type": "object",
+          "title": "Service",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "type": "string",
+              "title": "Service type",
+              "enum": [
+                "ClusterIP",
+                "NodePort",
+                "LoadBalancer"
+              ],
+              "default": "ClusterIP"
+            },
+            "port": {
+              "type": "integer",
+              "title": "Service port",
+              "default": 80
+            }
+          }
+        },
+        "env": {
+          "type": "object",
+          "title": "Environment variables",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "properties": {
+            "HOME": {
+              "type": "string",
+              "title": "HOME directory",
+              "default": "/tmp"
+            }
+          },
+          "default": {
+            "HOME": "/tmp"
+          }
+        },
+        "resources": {
+          "type": "object",
+          "title": "Resources",
+          "default": {}
+        },
+        "livenessProbe": {
+          "type": "object",
+          "description": "Kubernetes probe configuration (httpGet/tcpSocket/exec + timing). Empty/unset uses chart defaults.",
+          "additionalProperties": true
+        },
+        "readinessProbe": {
+          "type": "object",
+          "description": "Kubernetes probe configuration (httpGet/tcpSocket/exec + timing). Empty/unset uses chart defaults.",
+          "additionalProperties": true
+        },
+        "podDisruptionBudget": {
+          "type": "object",
+          "title": "PodDisruptionBudget",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false
+            },
+            "minAvailable": {
+              "type": [
+                "integer",
+                "string"
+              ],
+              "default": 1
+            }
+          }
+        },
+        "topologySpreadConstraints": {
+          "type": "array",
+          "title": "topologySpreadConstraints",
+          "default": []
+        }
+      }
+    },
+    "cdc": {
+      "type": "object",
+      "title": "Composition dynamic controller (cdc)",
+      "additionalProperties": false,
+      "properties": {
+        "image": {
+          "type": "object",
+          "title": "CDC image",
+          "additionalProperties": false,
+          "properties": {
+            "repository": {
+              "type": "string",
+              "title": "Image repository",
+              "default": "ghcr.io/krateoplatformops/composition-dynamic-controller"
+            },
+            "pullPolicy": {
+              "type": "string",
+              "title": "Image pull policy",
+              "enum": [
+                "IfNotPresent",
+                "Always",
+                "Never"
+              ],
+              "default": "IfNotPresent"
+            },
+            "tag": {
+              "type": "string",
+              "title": "Image tag",
+              "default": "0.20.2"
+            }
+          }
+        },
+        "replicaCount": {
+          "type": "integer",
+          "title": "Replica count",
+          "default": 1
+        },
+        "workers": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 512,
+          "title": "Fleet-wide default CDC reconcile workers; per-Kind spec.controller.workers overrides"
+        },
+        "resyncInterval": {
+          "type": "string",
+          "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
+          "title": "Fleet-wide default CDC resync interval e.g. 10m; per-Kind spec.controller.resyncInterval overrides"
+        },
+        "imagePullSecrets": {
+          "type": "array",
+          "title": "Image pull secrets",
+          "default": [],
+          "items": {
+            "type": "object"
+          }
+        },
+        "nameOverride": {
+          "type": "string",
+          "title": "Name override",
+          "default": ""
+        },
+        "fullnameOverride": {
+          "type": "string",
+          "title": "Fullname override",
+          "default": ""
+        },
+        "metrics": {
+          "type": "object",
+          "title": "Metrics",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "title": "Enable metrics",
+              "default": false
+            },
+            "port": {
+              "type": "integer",
+              "title": "Metrics port"
+            }
+          }
+        },
+        "serviceAccount": {
+          "type": "object",
+          "title": "Service account",
+          "additionalProperties": false,
+          "properties": {
+            "create": {
+              "type": "boolean",
+              "title": "Create service account",
+              "default": true
+            },
+            "automount": {
+              "type": "boolean",
+              "title": "Automount service account token",
+              "default": true
+            },
+            "annotations": {
+              "type": "object",
+              "title": "Service account annotations",
+              "default": {}
+            },
+            "name": {
+              "type": "string",
+              "title": "Service account name",
+              "default": ""
+            }
+          }
+        },
+        "podAnnotations": {
+          "type": "object",
+          "title": "Pod annotations",
+          "default": {}
+        },
+        "podLabels": {
+          "type": "object",
+          "title": "Pod labels",
+          "default": {}
+        },
+        "podSecurityContext": {
+          "type": "object",
+          "title": "Pod security context",
+          "default": {}
+        },
+        "securityContext": {
+          "type": "object",
+          "title": "Container security context",
+          "default": {}
+        },
+        "resources": {
+          "type": "object",
+          "title": "Resources",
+          "default": {}
+        },
+        "volumes": {
+          "type": "array",
+          "title": "Additional volumes",
+          "default": [],
+          "items": {
+            "type": "object"
+          }
+        },
+        "volumeMounts": {
+          "type": "array",
+          "title": "Additional volume mounts",
+          "default": [],
+          "items": {
+            "type": "object"
+          }
+        },
+        "nodeSelector": {
+          "type": "object",
+          "title": "Node selector",
+          "default": {}
+        },
+        "tolerations": {
+          "type": "array",
+          "title": "Tolerations",
+          "default": [],
+          "items": {
+            "type": "object"
+          }
+        },
+        "affinity": {
+          "type": "object",
+          "title": "Affinity",
+          "default": {}
+        },
+        "env": {
+          "type": "object",
+          "title": "Environment variables",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "properties": {
+            "HOME": {
+              "type": "string",
+              "title": "HOME directory",
+              "default": "/tmp"
+            },
+            "COMPOSITION_CONTROLLER_DEBUG": {
+              "type": "string",
+              "title": "Composition controller debug",
+              "default": "false"
+            }
+          },
+          "default": {
+            "HOME": "/tmp",
+            "COMPOSITION_CONTROLLER_DEBUG": "false"
+          }
+        },
+        "terminationGracePeriodSeconds": {
+          "type": "integer",
+          "title": "terminationGracePeriodSeconds"
+        },
+        "autoscaling": {
+          "type": "object",
+          "title": "Autoscaling (DEPRECATED / inert)",
+          "description": "Ignored: the CDC is a per-composition controller and is never autoscaled. Retained only so existing values overrides continue to validate.",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false
+            },
+            "minReplicas": {
+              "type": "integer",
+              "default": 1
+            },
+            "maxReplicas": {
+              "type": "integer",
+              "default": 100
+            },
+            "targetCPUUtilizationPercentage": {
+              "type": "integer",
+              "default": 80
+            },
+            "targetMemoryUtilizationPercentage": {
+              "type": "integer"
+            }
+          }
+        },
+        "livenessProbe": {
+          "type": "object",
+          "description": "Kubernetes probe configuration (httpGet/tcpSocket/exec + timing). Empty/unset uses chart defaults.",
+          "additionalProperties": true
+        },
+        "readinessProbe": {
+          "type": "object",
+          "description": "Kubernetes probe configuration (httpGet/tcpSocket/exec + timing). Empty/unset uses chart defaults.",
+          "additionalProperties": true
+        }
+      }
+    },
+    "global": {
+      "type": "object",
+      "title": "Global values",
+      "description": "Helm global values (injected when this chart is used as a subchart)."
+    },
+    "livenessProbe": {
+      "type": "object",
+      "description": "Kubernetes probe configuration (httpGet/tcpSocket/exec + timing). Empty/unset uses chart defaults.",
+      "additionalProperties": true
+    },
+    "readinessProbe": {
+      "type": "object",
+      "description": "Kubernetes probe configuration (httpGet/tcpSocket/exec + timing). Empty/unset uses chart defaults.",
+      "additionalProperties": true
+    },
+    "otel": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "tracing": {
+          "type": "boolean"
+        },
+        "endpoint": {
+          "type": "string"
+        },
+        "protocol": {
+          "type": "string"
+        }
+      }
+    },
+    "leaderElection": {
+      "type": "object",
+      "title": "Leader election",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "title": "Enable leader election (required for replicaCount>=2)",
+          "default": false
+        }
+      }
+    },
+    "podDisruptionBudget": {
+      "type": "object",
+      "title": "PodDisruptionBudget",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "minAvailable": {
+          "type": [
+            "integer",
+            "string"
+          ],
+          "default": 1
+        }
+      }
+    },
+    "topologySpreadConstraints": {
+      "type": "array",
+      "title": "topologySpreadConstraints",
+      "default": []
+    },
+    "terminationGracePeriodSeconds": {
+      "type": "integer",
+      "title": "terminationGracePeriodSeconds"
+    }
+  }
+}

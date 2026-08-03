@@ -1,0 +1,49 @@
+@startuml composition-dynamic-controller-flow
+skinparam nodesep 20
+skinparam ranksep 30
+skinparam conditionEndStyle hline
+
+start
+
+while (Is Composition Definition Applied?) 
+    if (Is delete called on Composition?) then (yes)
+        :Uninstall chart release;
+        note right: helm uninstall <release-name>
+        :Uninstall chart RBAC;
+        note right: kubectl delete role <release-name>\nkubectl delete rolebinding <release-name>\nkubectl delete clusterrole <release-name>\nkubectl delete clusterrolebinding <release-name>   
+        stop 
+    endif
+    
+    if (Is Helm Release Installed?) then (yes)
+        if (Has chart version changed?) then (yes)
+            :Call chart inspector to get the list of resources involved in chart installation;
+            note right: chart-inspector performs a dry-run install of the chart and\nreturns the list of resources that would be created.\n\nThe command used is:\nhelm install --dry-run=server <chart-name> <chart-version>
+            :Create RBAC for chart resources;
+            note right: kubectl apply role <release-name>\nkubectl apply rolebinding <release-name>\nkubectl apply clusterrole <release-name>\nkubectl apply clusterrolebinding <release-name>\n\nNote: This RBAC is the one that enable the CDC to manage\nchart resource and is related to the composition.
+            :Upgrade chart to new version;
+            note right: helm upgrade <release-name> <chart-name> --version <chart-version>
+        else (no)
+            if (Does cluster situation differ from chart template or composition version changed?) then (yes)
+                :Call chart inspector to get the list of resources involved in chart installation;
+                note right: chart-inspector performs a dry-run install of the chart and\nreturns the list of resources that would be created.\n\nThe command used is:\nhelm install --dry-run=server <chart-name> <chart-version>
+                :Create RBAC for chart resources;
+                note right: kubectl apply role <release-name>\nkubectl apply rolebinding <release-name>\nkubectl apply clusterrole <release-name>\nkubectl apply clusterrolebinding <release-name>\n\nNote: This RBAC is the one that enable the CDC to manage\nchart resource and is related to the composition.
+                :Upgrade chart; 
+                note right: helm upgrade <chart-name> <chart-version> --install
+            else (no)
+                :Composition is up-to-date;
+            endif 
+        endif
+    else (no)
+        :Call chart inspector to get the list of resources involved in chart installation;
+        note right: chart-inspector performs a dry-run install of the chart and\nreturns the list of resources that would be created.\n\nThe command used is:\nhelm install --dry-run=server <chart-name> <chart-version>
+        :Create RBAC for chart resources;
+        note right: kubectl apply role <release-name>\nkubectl apply rolebinding <release-name>\nkubectl apply clusterrole <release-name>\nkubectl apply clusterrolebinding <release-name>\n\nNote: This RBAC is the one that enable the CDC to manage\nchart resource and is related to the composition.
+        :Create new chart release;
+        note right: helm install <release-name> <chart-name> --version <chart-version>
+    endif 
+endwhile
+-[hidden]->
+detach
+
+@enduml

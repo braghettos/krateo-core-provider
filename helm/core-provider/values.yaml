@@ -1,0 +1,323 @@
+# Default values for core-provider.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+replicaCount: 1
+image:
+  repository: ghcr.io/krateo-platformops/core-provider
+  pullPolicy: IfNotPresent
+  # Overrides the image tag whose default is the chart appVersion.
+  tag: ""
+# OpenTelemetry export for the engine (core-provider) AND every spawned cdc. DEFAULT-OFF: with
+# enabled=false the deployments emit no OTEL_* env and are byte-identical (no churn). Flip
+# enabled=true to stream metrics+traces to the ClickHouse stack; when endpoint is left "" the chart
+# defaults it to the node-local daemonset OTLP agent in the release namespace
+# (http://otel-collector-daemonset-opentelemetry-collector.<.Release.Namespace>.svc:4318) — set
+# endpoint explicitly to override. The installer only needs enabled=true when observability is on.
+# (Logs are always-on structured JSON regardless of this block.)
+otel:
+  enabled: false
+  tracing: true
+  endpoint: ""
+  protocol: http/protobuf
+imagePullSecrets: []
+nameOverride: "core-provider"
+fullnameOverride: ""
+serviceAccount:
+  # Specifies whether a service account should be created
+  create: true
+  # Automatically mount a ServiceAccount's API credentials?
+  automount: true
+  # Annotations to add to the service account
+  annotations: {}
+  # The name of the service account to use.
+  # If not set and create is true, a name is generated using the fullname template
+  name: ""
+podAnnotations: {}
+podLabels: {}
+podSecurityContext: {}
+# fsGroup: 2000
+
+securityContext: {}
+# capabilities:
+#   drop:
+#   - ALL
+# readOnlyRootFilesystem: true
+# runAsNonRoot: true
+# runAsUser: 1000
+
+service:
+  type: ClusterIP
+  port: 80
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  # kubernetes.io/ingress.class: nginx
+  # kubernetes.io/tls-acme: "true"
+  hosts:
+    - host: chart-example.local
+      paths:
+        - path: /
+          pathType: ImplementationSpecific
+  tls: []
+  #  - secretName: chart-example-tls
+  #    hosts:
+  #      - chart-example.local
+# A CPU request is REQUIRED for the CPU-utilization HPA to compute a target (utilization is a
+# fraction of the request); with resources:{} the HPA reads <unknown> and never scales.
+# Memory: on cold start the engine reconciles EVERY CompositionDefinition at once (fetch chart +
+# generate schema/CRD + render), a burst that scales with composition count. On a real umbrella
+# (~30 CDs + the multicluster controllers) the cold-start peak measured >1Gi: at 256Mi it OOMKills
+# in ~46s, at 1Gi in ~2min — either way it crash-loops. 2Gi survives the cold start (verified).
+# CPU: deliberately NO cpu limit. That same cold-start burst is CPU-heavy; a 500m limit throttled
+# the engine in ~99.8% of scheduling periods (cgroup cpu.stat nr_throttled≈nr_periods), so it
+# pegged at 500m yet made ZERO reconcile progress — versions never advanced, CDCs never rolled,
+# despite being otherwise healthy (installer-release). A CPU limit on a bursty reconcile loop is an
+# anti-pattern here; the request keeps the HPA valid and the memory limit still bounds the pod. The
+# healthy older cluster runs the engine with no limits at all.
+resources:
+  requests:
+    cpu: 500m
+    memory: 512Mi
+  limits:
+    memory: 2Gi
+# Interim probes: the binary has no /healthz endpoint yet, so we TCP-probe the always-bound metrics
+# port (8080). Replace with httpGet /healthz + /readyz once the binary exposes a health endpoint.
+livenessProbe:
+  tcpSocket:
+    port: 8080
+  initialDelaySeconds: 15
+  periodSeconds: 20
+readinessProbe:
+  tcpSocket:
+    port: 8080
+  initialDelaySeconds: 5
+  periodSeconds: 10
+# HA is opt-in: raising replicaCount>=2 REQUIRES leaderElection.enabled=true, or the replicas
+# double-reconcile (the binary defaults leader-election off). Enabling it also needs the
+# coordination.k8s.io/leases RBAC, which the chart grants when this is on.
+leaderElection:
+  enabled: false
+# PodDisruptionBudget — only rendered when enabled AND replicaCount>1 (a PDB on a single replica
+# would block node drains).
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+# Spread replicas across nodes/zones so a single node failure cannot take out all of them. Only
+# meaningful at replicaCount>1; rendered when non-empty.
+topologySpreadConstraints: []
+# core-provider's provider-runtime manager drains in-flight reconciles on SIGTERM (controller-runtime
+# GracefulShutdownTimeout, ~30s). Keep the pod grace period above it so the kubelet does not SIGKILL
+# mid-drain.
+terminationGracePeriodSeconds: 45
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 100
+  targetCPUUtilizationPercentage: 80
+  # targetMemoryUtilizationPercentage: 80
+# Additional volumes on the output Deployment definition.
+volumes: []
+# Additional volumeMounts on the output Deployment definition.
+volumeMounts: []
+nodeSelector: {}
+tolerations: []
+affinity: {}
+env:
+  CORE_PROVIDER_DEBUG: "false"
+# apiRefRBAC — auto-generate the RBAC that authorizes a CompositionDefinition's apiRef RESTAction
+# reads. When enabled, core-provider's pod gets a projected authn-audience token and an authn
+# allowlist mapping, and calls snowplow's /rbac (authenticated) to grant the per-composition group
+# exactly the reads the RESTAction performs.
+#
+# Requires the authn serviceaccount login strategy (CRD serviceaccount.authn.krateo.io) to be
+# installed; set enabled=false on clusters without it.
+apiRefRBAC:
+  enabled: true
+  # snowplowUrl/authnUrl: leave "" to derive from the release namespace at render time —
+  # http://snowplow.<.Release.Namespace>.svc.cluster.local:8081 and authn.<ns>...:8082 (the chart
+  # defaults). Set either explicitly to override (e.g. a port-80 exposure).
+  snowplowUrl: ""
+  authnUrl: ""
+  # Namespace where core-provider's authn allowlist mapping is created (where authn watches).
+  # "" ⇒ the release namespace.
+  authnNamespace: ""
+  # Group the issued identity belongs to (nominal — /rbac runs under snowplow's own SA).
+  group: "krateo:core-provider"
+  tokenAudience: authn
+  tokenExpirationSeconds: 3600
+chartInspector:
+  image:
+    repository: ghcr.io/krateo-platformops/chart-inspector
+    pullPolicy: IfNotPresent
+    tag: 1.0.5
+  # chart-inspector is stateless (renders manifests to compute RBAC) and is the highest-value HA
+  # win: its outage wedges installs on core-provider's ~30s /rbac timeout. It ships HA by default.
+  #
+  # FOOTPRINT NOTE: this defaults to 2 replicas, and each requests cpu:"1"/memory:512Mi (below), so
+  # the default committed footprint is ~2 cores / 1Gi. On `helm upgrade` an existing single-replica
+  # install scales to 2 shortly after (HPA minReplicas:2). On small/resource-constrained clusters set
+  # chartInspector.replicaCount:1 + chartInspector.autoscaling.enabled:false (and/or lower resources).
+  replicaCount: 2
+  imagePullSecrets: []
+  nameOverride: ""
+  fullnameOverride: ""
+  # A real HPA now consumes these (chart/templates/chart-inspector/hpa.yaml). chart-inspector has
+  # CPU requests set, so CPU-utilization autoscaling is valid for it.
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 80
+  # Probe port MUST be 8081 — the chart-inspector server (image 1.0.5) listens on 8081, and the
+  # Service already targets 8081. These tcpSocket probes previously pointed at :80 (nothing listens
+  # there), so every pod got "connection refused" and was liveness-killed within ~60s; the only
+  # survivor was a pre-existing pod that had no liveness probe at all. New replicas died before the
+  # HPA could scale, so core-provider's /rbac inspect calls had ~one struggling backend and the CDC
+  # rollout stalled (observed on installer-release). The modest timeout/failureThreshold slack also
+  # keeps a busy-but-alive inspector up during heavy umbrella renders. Upgrade to httpGet /healthz
+  # once the image exposes a health path.
+  livenessProbe:
+    tcpSocket:
+      port: 8081
+    initialDelaySeconds: 15
+    periodSeconds: 20
+    timeoutSeconds: 5
+    failureThreshold: 6
+  readinessProbe:
+    tcpSocket:
+      port: 8081
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 6
+  # Rendered only when enabled AND replicaCount>1 (default 2 → a PDB keeps one inspector serving
+  # /rbac through a node drain).
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  topologySpreadConstraints: []
+  serviceAccount:
+    # Specifies whether a service account should be created
+    create: true
+    # Automatically mount a ServiceAccount's API credentials?
+    automount: true
+    # Annotations to add to the service account
+    annotations: {}
+    # The name of the service account to use.
+    # If not set and create is true, a name is generated using the fullname template
+    name: ""
+  service:
+    type: ClusterIP
+    # Drives the container port only (the Service template hardcodes 8081). The server listens on
+    # 8081, so this MUST be 8081 — at 80 the declared containerPort and the probes mismatched the
+    # real listen port.
+    port: 8081
+  env:
+    HOME: /tmp # home should be set to /tmp or any other writable directory to avoid permission issues with helm https://github.com/helm/helm/issues/8038
+  # chart-inspector renders the WHOLE umbrella to compute RBAC; core-provider calls it with a
+  # ~30s HTTP timeout. On a heavy umbrella (full agent fleet + observability) on a CPU-contended
+  # node the render exceeds that timeout ("getting chartinspector: context deadline exceeded"),
+  # wedging the install (#56). A guaranteed CPU request keeps the render fast enough; the burst
+  # limit covers the heaviest umbrellas. Tune down for tiny single-component installs if needed.
+  resources:
+    requests:
+      cpu: "1"
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 1Gi
+cdc:
+  image:
+    repository: ghcr.io/krateo-platformops/composition-dynamic-controller
+    pullPolicy: IfNotPresent
+    # 1.3.14: Observe no longer reports Ready=True "Composition is up-to-date" while a helm
+    # operation is still pending — it sets Ready=False/PendingHelmOperation naming the release
+    # status and how long it has been pending. Previously a spec change queued behind the pending
+    # lock sat unapplied for up to pendingOperationGrace (5m) while the CR asserted convergence,
+    # so anything gating on Ready proceeded on a false premise. Reconcile behaviour is unchanged
+    # (the ExternalObservation is the same); recovery past the grace period still rolls the stale
+    # lock back and applies the change. Verified end-to-end on kind.
+    # 1.3.15: status writes retry on optimistic-concurrency conflict (updateStatusWithRetry) — a
+    # benign "object has been modified" 409 during a GVK-migration handover no longer wedges the
+    # composition Ready=False until a manual controller restart (krateo-core-provider#57, fix #1).
+    tag: 1.3.15
+  replicaCount: 1
+  # workers / resyncInterval: OPTIONAL fleet-wide defaults for every CDC's reconcile concurrency and
+  # resync interval. Leave unset (the default) for per-Kind opt-in only, via a CompositionDefinition's
+  # spec.controller; set here to apply a floor across ALL CDCs (a definition's spec.controller still
+  # overrides). Unset ⇒ the arg is omitted and the CDC uses its own built-in default (1 worker / 3m).
+  # workers: 4
+  # resyncInterval: "10m"
+  imagePullSecrets: []
+  nameOverride: ""
+  fullnameOverride: ""
+  metrics:
+    enabled: false
+    #port: 8080
+  serviceAccount:
+    # Specifies whether a service account should be created
+    create: true
+    # Automatically mount a ServiceAccount's API credentials?
+    automount: true
+    # Annotations to add to the service account
+    annotations: {}
+    # The name of the service account to use.
+    # If not set and create is true, a name is generated using the fullname template
+    name: ""
+  podAnnotations: {}
+  podLabels: {}
+  podSecurityContext: {}
+  # fsGroup: 2000
+
+  securityContext: {}
+  # capabilities:
+  #   drop:
+  #   - ALL
+  # readOnlyRootFilesystem: true
+  # runAsNonRoot: true
+  # runAsUser: 1000
+
+  # One Deployment per composition TYPE runs concurrently, so keep the per-controller footprint
+  # small. CDC is single-replica by design (per-composition controller, no leader election).
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  # CDC exposes no port by default (metrics off, pprof localhost-only), so no TCP/HTTP probe is
+  # possible without a binary change or enabling metrics. HA here is clean rollover on redeploy
+  # (graceful drain), not readiness-gating — probes are intentionally left off for now.
+  # livenessProbe: {}
+  # readinessProbe: {}
+
+  # Graceful drain (unstructured-runtime v1.3.2+): let in-flight reconciles finish on SIGTERM.
+  # terminationGracePeriodSeconds MUST exceed the drain window so the kubelet does not SIGKILL
+  # mid-drain — 45s gives ~15s slack over the 30s default drain.
+  #
+  # NOTE: the drain code ships in composition-dynamic-controller >= 1.3.2; the default image below
+  # (1.2.1) predates it. Bump cdc.image.tag to a >=1.3.2 build to actually run the drain.
+  terminationGracePeriodSeconds: 45
+  # Additional volumes on the output Deployment definition.
+  volumes: []
+  # Additional volumeMounts on the output Deployment definition.
+  volumeMounts: []
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  env:
+    HOME: /tmp # home should be set to /tmp or any other writable directory to avoid permission issues with helm https://github.com/helm/helm/issues/8038
+    COMPOSITION_CONTROLLER_DEBUG: "false"
+    COMPOSITION_CONTROLLER_WORKERS: "10"
+    # Graceful-shutdown drain window (composition-dynamic-controller >= 1.3.2). Keep it strictly
+    # below terminationGracePeriodSeconds (45s) so the pod finishes draining before SIGKILL.
+    COMPOSITION_CONTROLLER_GRACEFUL_SHUTDOWN_TIMEOUT: "30s"
+    # Resync interval for every spawned composition-dynamic-controller (default 3m). The
+    # installer's self-bootstrap emits each component's Pass-B CR only once its deps are
+    # Ready AND its CRD is discoverable; advancement to the next dependency level happens
+    # on the cdc's resync (its RESTMapper re-discovers new CRDs on a cache miss). 60s makes
+    # the umbrella self-bootstrap fully hands-off in a few minutes instead of ~3m per level.
+    COMPOSITION_CONTROLLER_RESYNC_INTERVAL: "60s"

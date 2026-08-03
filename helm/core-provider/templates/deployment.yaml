@@ -1,0 +1,134 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "core-provider.fullname" . }}
+  labels:
+    {{- include "core-provider.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "core-provider.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/configmap: {{ printf "%s%s%s%s%s%s" (include (print $.Template.BasePath "/configmap.yaml") .) (include (print $.Template.BasePath "/cdc-configmap.yaml") .) (include (print $.Template.BasePath "/cdc-deployment.yaml") .) (include (print $.Template.BasePath "/cdc-rbac.yaml") .) (include (print $.Template.BasePath "/cdc-service.yaml") .) (include (print $.Template.BasePath "/jsonschema-configmap.yaml") .) | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "core-provider.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "core-provider.serviceAccountName" . }}
+      {{- with .Values.terminationGracePeriodSeconds }}
+      terminationGracePeriodSeconds: {{ . }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: {{ include "core-provider.fullname" . }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "core-provider.fullname" . }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
+              protocol: TCP
+          {{- with .Values.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+
+          volumeMounts:
+            - mountPath: /tmp/assets/cdc-deployment
+              name: cdc-deployment
+              readOnly: true
+            - mountPath: /tmp/assets/cdc-configmap
+              name: cdc-configmap
+              readOnly: true
+            - mountPath: /tmp/assets/cdc-rbac
+              name: cdc-rbac
+              readOnly: true
+            - mountPath: /tmp/assets/json-schema-configmap
+              name: jsonschema-configmap
+              readOnly: true
+            {{- if .Values.cdc.metrics.enabled }}
+            - mountPath: /tmp/assets/cdc-service
+              name: cdc-service
+              readOnly: true
+            {{- end }}
+            {{- if .Values.apiRefRBAC.enabled }}
+            # Projected authn-audience token core-provider exchanges for a service JWT to call
+            # snowplow's JWT-gated /rbac (same handshake it provisions for the CDC).
+            - name: authn-serviceaccount-token
+              mountPath: /var/run/secrets/krateo.io/serviceaccount
+              readOnly: true
+            {{- end }}
+            {{- with .Values.volumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      volumes:
+        - name: cdc-deployment
+          configMap:
+            name: {{ include "core-provider.fullname" . }}-cdc-deployment
+        - name: cdc-configmap
+          configMap:
+            name: {{ include "core-provider.fullname" . }}-cdc-configmap
+        - name: cdc-rbac
+          configMap:
+            name: {{ include "core-provider.fullname" . }}-rbac-configmap
+        - name: jsonschema-configmap
+          configMap:
+            name: {{ include "core-provider.fullname" . }}-jsonschema-configmap
+        {{- if .Values.cdc.metrics.enabled }}
+        - name: cdc-service
+          configMap:
+            name: {{ include "core-provider.fullname" . }}-service-configmap
+        {{- end }}
+        {{- if .Values.apiRefRBAC.enabled }}
+        - name: authn-serviceaccount-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  audience: {{ .Values.apiRefRBAC.tokenAudience }}
+                  expirationSeconds: {{ .Values.apiRefRBAC.tokenExpirationSeconds }}
+        {{- end }}
+          {{- with .Values.volumes }}
+          {{- toYaml . | nindent 8 }}
+          {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

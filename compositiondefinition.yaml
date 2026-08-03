@@ -1,0 +1,9 @@
+apiVersion: core.krateo.io/v1alpha1
+kind: CompositionDefinition
+metadata:
+  name: core-provider
+  namespace: krateo-system
+spec:
+  chart:
+    url: oci://ghcr.io/krateo-platformops/charts/core-provider
+    version: "0.35.4"

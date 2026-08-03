@@ -1,0 +1,106 @@
+---
+# In-cluster echo server (multi-arch). /get returns {"args": {...query...}, ...},
+# so extras templated into the query come back in the response — the assertion vehicle.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo
+  namespace: demo-system
+  labels: { app: echo }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: echo } }
+  template:
+    metadata: { labels: { app: echo } }
+    spec:
+      containers:
+      - name: echo
+        image: ghcr.io/mccutchen/go-httpbin:latest
+        imagePullPolicy: Never
+        ports: [ { name: http, containerPort: 8080 } ]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo
+  namespace: demo-system
+spec:
+  selector: { app: echo }
+  ports: [ { name: http, port: 8080, targetPort: http } ]
+---
+# Endpoint the RESTAction calls (the in-cluster echo server).
+apiVersion: v1
+kind: Secret
+type: Opaque
+metadata:
+  name: echo-endpoint
+  namespace: demo-system
+stringData:
+  server-url: http://echo.demo-system.svc.cluster.local:8080
+---
+# The RESTAction the CDC resolves via apiRef. Its path templates the request extras
+# (.compositionName/.compositionNamespace/.compositionId injected per-instance by the CDC,
+# plus the static .region) into the echo call, which reflects them back under .api.echo.args.
+apiVersion: templates.krateo.io/v1
+kind: RESTAction
+metadata:
+  name: status-sources
+  namespace: demo-system
+spec:
+  api:
+  - name: echo
+    path: ${ "/get?cn=" + (.compositionName) + "&cns=" + (.compositionNamespace) + "&cid=" + (.compositionId) + "&region=" + (.region) }
+    endpointRef:
+      name: echo-endpoint
+      namespace: demo-system
+---
+# The CDC's own ServiceAccount (what core-provider would create per composition).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cdc-e2e-sa
+  namespace: demo-system
+---
+# authn allowlist mapping: authorizes cdc-e2e-sa to exchange its token; issues identity
+# username=cdc-e2e, groups=[krateo:cdc-e2e]. Lives in the authn operator namespace.
+apiVersion: serviceaccount.authn.krateo.io/v1alpha1
+kind: ServiceAccount
+metadata:
+  name: cdc-e2e
+  namespace: demo-system
+spec:
+  serviceAccountRef:
+    namespace: demo-system
+    name: cdc-e2e-sa
+  groups:
+    - krateo:cdc-e2e
+  displayName: "CDC e2e"
+---
+# RBAC for the issued identity's group: read the RESTAction + endpoint Secret in demo-system,
+# so snowplow authorizes the user to resolve status-sources.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: cdc-e2e-restaction-read
+  namespace: demo-system
+rules:
+- apiGroups: ["templates.krateo.io"]
+  resources: ["restactions"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["secrets", "configmaps"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cdc-e2e-restaction-read
+  namespace: demo-system
+subjects:
+- kind: Group
+  name: krateo:cdc-e2e
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: Role
+  name: cdc-e2e-restaction-read
+  apiGroup: rbac.authorization.k8s.io

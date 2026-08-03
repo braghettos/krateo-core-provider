@@ -1,0 +1,35 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ "{{" }} .resource {{ "}}" }}-{{ "{{" }} .apiVersion {{ "}}" }}-configmap
+  namespace: {{ "{{" }} .namespace {{ "}}" }}
+  labels:
+    app.kubernetes.io/name: {{ "{{" }} trunc 63 .name {{ "}}" }}
+    app.kubernetes.io/instance: {{ "{{" }} trunc 63 .resource {{ "}}" }}
+    app.kubernetes.io/version: {{ "{{" }} trunc 63 .apiVersion {{ "}}" }}
+    app.kubernetes.io/component: controller
+    app.kubernetes.io/part-of: krateo
+    app.kubernetes.io/managed-by: krateo
+data:
+  COMPOSITION_CONTROLLER_SA_NAME: {{ "{{" }} .composition_controller_sa_name {{ "}}" }}
+  COMPOSITION_CONTROLLER_SA_NAMESPACE: {{ "{{" }} .composition_controller_sa_namespace {{ "}}" }}
+  COMPOSITION_CONTROLLER_STATUS_DATA_TEMPLATE: {{ "{{" }} .status_data_template | quote {{ "}}" }}
+  COMPOSITION_CONTROLLER_API_REF_NAME: {{ "{{" }} .api_ref_name | quote {{ "}}" }}
+  COMPOSITION_CONTROLLER_API_REF_NAMESPACE: {{ "{{" }} .api_ref_namespace | quote {{ "}}" }}
+  COMPOSITION_CONTROLLER_API_REF_EXTRAS: {{ "{{" }} .api_ref_extras | quote {{ "}}" }}
+  URL_CHART_INSPECTOR: http://{{ include "chart-inspector.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:8081/
+  KRATEO_NAMESPACE: {{ .Release.Namespace }}
+  DEPLOYMENT_NAME: {{ "{{" }} .resource {{ "}}" }}-{{ "{{" }} .apiVersion {{ "}}" }}-controller
+  {{- if .Values.cdc.metrics.enabled }}
+  COMPOSITION_CONTROLLER_METRICS_SERVER_PORT: "{{ .Values.cdc.metrics.port | default 0 }}" # Set to 0 to disable metrics server
+  {{- end }}
+  {{- if .Values.otel.enabled }}
+  OTEL_ENABLED: "true"
+  OTEL_TRACING_ENABLED: "{{ .Values.otel.tracing }}"
+  OTEL_EXPORTER_OTLP_ENDPOINT: {{ .Values.otel.endpoint | default (printf "http://otel-collector-daemonset-opentelemetry-collector.%s.svc:4318" .Release.Namespace) | quote }}
+  OTEL_EXPORTER_OTLP_PROTOCOL: {{ .Values.otel.protocol | default "http/protobuf" | quote }}
+  SERVICE_VERSION: {{ .Values.cdc.image.tag | quote }}
+  {{- end }}
+  {{- range $key, $value := .Values.cdc.env }}
+  {{ $key }}: {{ $value | quote }}
+  {{- end }}

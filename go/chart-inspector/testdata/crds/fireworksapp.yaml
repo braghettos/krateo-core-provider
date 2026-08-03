@@ -1,0 +1,394 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: fireworksapps.composition.krateo.io
+spec:
+  conversion:
+    strategy: None
+  group: composition.krateo.io
+  names:
+    categories:
+    - compositions
+    - comps
+    kind: FireworksApp
+    listKind: FireworksAppList
+    plural: fireworksapps
+    singular: fireworksapp
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
+    - jsonPath: .status.conditions[?(@.type=='Ready')].status
+      name: READY
+      type: string
+    name: v1-1-10
+    schema:
+      openAPIV3Schema:
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          spec:
+            properties:
+              app:
+                description: Helm Chart parameters section
+                properties:
+                  service:
+                    description: Helm Chart service parameters section
+                    properties:
+                      port:
+                        default: 31180
+                        description: Helm Chart service port
+                        maximum: 32767
+                        minimum: 30000
+                        type: integer
+                      type:
+                        default: NodePort
+                        description: Helm Chart service type
+                        enum:
+                        - NodePort
+                        - LoadBalancer
+                        type: string
+                    type: object
+                type: object
+              argocd:
+                description: ArgoCD parameters section
+                properties:
+                  application:
+                    description: ArgoCD application configuration section
+                    properties:
+                      destination:
+                        description: ArgoCD Application destination parameters section
+                        properties:
+                          namespace:
+                            default: fireworks-app
+                            description: ArgoCD Application target namespace
+                            type: string
+                          server:
+                            default: https://kubernetes.default.svc
+                            description: ArgoCD Application target cluster
+                            type: string
+                        type: object
+                      project:
+                        default: default
+                        description: ArgoCD Application project
+                        type: string
+                      source:
+                        description: ArgoCD Application source parameters section
+                        properties:
+                          path:
+                            default: chart/
+                            description: ArgoCD Application source path inside the
+                              repository created by the template
+                            type: string
+                        type: object
+                      syncPolicy:
+                        description: ArgoCD Application synchronization policies section
+                        properties:
+                          automated:
+                            description: ArgoCD Application automated synchronization
+                              policies section
+                            properties:
+                              prune:
+                                default: true
+                                description: Prune specifies to delete resources from
+                                  the cluster that are no longer tracked in git
+                                type: boolean
+                              selfHeal:
+                                default: true
+                                description: SelfHeal specifies whether to revert
+                                  resources back to their desired state upon modification
+                                  in the cluster
+                                type: boolean
+                            type: object
+                        type: object
+                    type: object
+                  namespace:
+                    default: krateo-system
+                    description: Namespace where ArgoCD has been installed
+                    type: string
+                type: object
+              git:
+                description: Git Repository parameters section
+                properties:
+                  deletionPolicy:
+                    default: Orphan
+                    description: DeletionPolicy specifies what will happen to the
+                      underlying external when this managed resource is deleted -
+                      either "Delete" or "Orphan" the external resource.
+                    enum:
+                    - Delete
+                    - Orphan
+                    type: string
+                  fromRepo:
+                    description: Parameters section for Git repository used as template
+                      for the application skeleton
+                    properties:
+                      branch:
+                        default: main
+                        description: Branch of Git repository used as template for
+                          the application skeleton
+                        type: string
+                      credentials:
+                        description: References to the secrets that contain the credentials
+                          required to clone the repository (in case of private ones)
+                        properties:
+                          authMethod:
+                            default: basic
+                            description: AuthMethod defines the authentication mode.
+                              One of 'basic' or 'bearer'
+                            enum:
+                            - basic
+                            - bearer
+                            type: string
+                          secretRef:
+                            description: Reference details about the secret where
+                              the credentials are stored
+                            properties:
+                              key:
+                                default: token
+                                description: Key of the secret to use
+                                type: string
+                              name:
+                                default: github-repo-creds
+                                description: Name of the secret where the credentials
+                                  are stored
+                                type: string
+                              namespace:
+                                default: krateo-system
+                                description: Namespace of the secret where the credentials
+                                  are stored
+                                type: string
+                            type: object
+                        type: object
+                      name:
+                        default: krateo-v2-template-fireworksapp
+                        description: Name for the target Git repository
+                        type: string
+                      org:
+                        default: krateoplatformops
+                        description: Organization/group/subgroup for the target Git
+                          repository
+                        type: string
+                      path:
+                        default: skeleton/
+                        description: Path of Git repository used as template for the
+                          application skeleton
+                        type: string
+                      scmUrl:
+                        default: https://github.com
+                        description: (schema+host e.g. https://github.com) for the
+                          target Git repository
+                        type: string
+                    type: object
+                  insecure:
+                    default: true
+                    description: Insecure is useful with hand made SSL certs
+                    type: boolean
+                  toRepo:
+                    description: Parameters section for Git repository that will be
+                      created by Krateo
+                    properties:
+                      apiUrl:
+                        default: https://api.github.com
+                        description: URL to use for API
+                        type: string
+                      branch:
+                        default: main
+                        description: Branch for the target Git repository
+                        type: string
+                      credentials:
+                        description: References to the secrets that contain the credentials
+                          required to push the content the repository (in case of
+                          private ones)
+                        properties:
+                          authMethod:
+                            default: basic
+                            description: AuthMethod defines the authentication mode.
+                              One of 'basic' or 'bearer'
+                            enum:
+                            - basic
+                            - bearer
+                            type: string
+                          secretRef:
+                            description: Reference details about the secret where
+                              the credentials are stored
+                            properties:
+                              key:
+                                default: token
+                                description: Key of the secret to use
+                                type: string
+                              name:
+                                default: github-repo-creds
+                                description: Name of the secret where the credentials
+                                  are stored
+                                type: string
+                              namespace:
+                                default: krateo-system
+                                description: Namespace of the secret where the credentials
+                                  are stored
+                                type: string
+                            type: object
+                        type: object
+                      deletionPolicy:
+                        default: Delete
+                        description: DeletionPolicy specifies what will happen to
+                          the underlying external when this managed resource is deleted
+                          - either "Delete" or "Orphan" the external resource.
+                        enum:
+                        - Delete
+                        - Orphan
+                        type: string
+                      initialize:
+                        default: true
+                        description: Whether the repository must be initialized
+                        type: boolean
+                      name:
+                        description: Name for the target Git repository
+                        type: string
+                      org:
+                        default: krateoplatformops-archive
+                        description: Organization/group/subgroup for the target Git
+                          repository
+                        type: string
+                      path:
+                        default: /
+                        description: Path where the template will be placed
+                        type: string
+                      private:
+                        default: false
+                        description: Whether the repository is private
+                        type: boolean
+                      scmUrl:
+                        default: https://github.com
+                        description: (schema+host e.g. https://github.com) for the
+                          target Git repository
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  unsupportedCapabilities:
+                    default: true
+                    description: UnsupportedCapabilities enable Go-Git transport.UnsupportedCapabilities
+                      Azure DevOps requires capabilities multi_ack / multi_ack_detailed,
+                      which are not fully implemented in go-git library and by default
+                      are included in transport.UnsupportedCapabilities.
+                    type: boolean
+                required:
+                - toRepo
+                type: object
+            required:
+            - git
+            type: object
+          status:
+            properties:
+              conditions:
+                description: Conditions of the resource.
+                items:
+                  description: A Condition that may apply to a resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        LastTransitionTime is the last time this condition transitioned from one
+                        status to another.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        A Message containing details about this condition's last transition from
+                        one status to another, if any.
+                      type: string
+                    reason:
+                      description: A Reason for this condition's last transition from
+                        one status to another.
+                      type: string
+                    status:
+                      description: Status of this condition; is it currently True,
+                        False, or Unknown?
+                      type: string
+                    type:
+                      description: |-
+                        Type of this condition. At most one of each condition type may apply to
+                        a resource at any point in time.
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              failedObjectRef:
+                properties:
+                  apiVersion:
+                    description: API version of the object.
+                    type: string
+                  kind:
+                    description: Kind of the object.
+                    type: string
+                  name:
+                    description: Name of the object.
+                    type: string
+                  namespace:
+                    description: Namespace of the object.
+                    type: string
+                type: object
+              helmChartUrl:
+                type: string
+              helmChartVersion:
+                type: string
+              managed:
+                items:
+                  properties:
+                    apiVersion:
+                      type: string
+                    name:
+                      type: string
+                    namespace:
+                      type: string
+                    resource:
+                      type: string
+                  type: object
+                type: array
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+status:
+  acceptedNames:
+    categories:
+    - compositions
+    - comps
+    kind: FireworksApp
+    listKind: FireworksAppList
+    plural: fireworksapps
+    singular: fireworksapp
+  conditions:
+  - lastTransitionTime: "2025-02-06T10:28:17Z"
+    message: no conflicts found
+    reason: NoConflicts
+    status: "True"
+    type: NamesAccepted
+  - lastTransitionTime: "2025-02-06T10:28:17Z"
+    message: the initial names have been accepted
+    reason: InitialNamesAccepted
+    status: "True"
+    type: Established
+  storedVersions:
+  - v1-1-10

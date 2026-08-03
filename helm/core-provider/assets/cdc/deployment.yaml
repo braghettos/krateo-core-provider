@@ -1,0 +1,123 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ "{{" }} .resource {{ "}}" }}-{{ "{{" }} .apiVersion {{ "}}" }}-controller
+  namespace: {{ "{{" }} .namespace {{ "}}" }}
+  labels:
+    app.kubernetes.io/name: {{ "{{" }} trunc 63 .name {{ "}}" }}
+    app.kubernetes.io/instance: {{ "{{" }} trunc 63 .resource {{ "}}" }}
+    app.kubernetes.io/version: {{ "{{" }} trunc 63 .apiVersion {{ "}}" }}
+    app.kubernetes.io/component: controller
+    app.kubernetes.io/part-of: krateo
+    app.kubernetes.io/managed-by: krateo
+spec:
+  # CDC is a per-composition controller: always a fixed replica count, never autoscaled (its
+  # dead autoscaling.* values were removed to defuse the strip-replicas trap).
+  replicas: {{ .Values.cdc.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ "{{" }} trunc 63 .name {{ "}}" }}
+  template:
+    metadata:
+      name: {{ "{{" }} .name {{ "}}" }}
+      namespace: {{ "{{" }} .namespace {{ "}}" }}
+      labels:
+        app.kubernetes.io/name: {{ "{{" }} trunc 63 .name {{ "}}" }}
+        app.kubernetes.io/part-of: krateo
+    spec:
+      serviceAccountName: {{ "{{" }} .serviceAccountName {{ "}}" }}
+      {{- with .Values.cdc.terminationGracePeriodSeconds }}
+      # Must exceed the graceful-shutdown drain window so the kubelet does not SIGKILL mid-drain.
+      terminationGracePeriodSeconds: {{ . }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.cdc.podSecurityContext | nindent 8 }}
+      containers:
+        - name: {{ "{{" }} .resource {{ "}}" }}-{{ "{{" }} .apiVersion {{ "}}" }}-controller
+          image: "{{ .Values.cdc.image.repository }}:{{ .Values.cdc.image.tag | default "0.17.4" }}"
+          imagePullPolicy: {{ .Values.cdc.image.pullPolicy }}
+          envFrom:
+            - configMapRef:
+                name: {{ "{{" }} .resource {{ "}}" }}-{{ "{{" }} .apiVersion {{ "}}" }}-configmap
+          securityContext:
+            {{- toYaml .Values.cdc.securityContext | nindent 12 }}
+          args:
+            - -group={{ "{{" }} .apiGroup {{ "}}" }}
+            - -version={{ "{{" }} .apiVersion {{ "}}" }}
+            - -resource={{ "{{" }} .resource {{ "}}" }}
+            # Per-CompositionDefinition tuning (spec.controller). core-provider injects .workers /
+            # .resyncInterval only when a definition sets them (per-Kind override). The chart-global
+            # cdc.workers / cdc.resyncInterval, when set, act as a fleet-wide DEFAULT that every CDC
+            # inherits and any definition's spec.controller still overrides. When BOTH are unset the
+            # arg is omitted entirely and the CDC uses its own built-in default (1 worker, 3m resync),
+            # so nothing changes for existing definitions and they don't restart on upgrade.
+            {{- if .Values.cdc.workers }}
+            - -workers={{ "{{" }} .workers | default {{ .Values.cdc.workers }} {{ "}}" }}
+            {{- else }}
+            {{ "{{" }}- if .workers }}
+            - -workers={{ "{{" }} .workers {{ "}}" }}
+            {{ "{{" }}- end }}
+            {{- end }}
+            {{- if .Values.cdc.resyncInterval }}
+            - -resync-interval={{ "{{" }} .resyncInterval | default {{ .Values.cdc.resyncInterval | quote }} {{ "}}" }}
+            {{- else }}
+            {{ "{{" }}- if .resyncInterval }}
+            - -resync-interval={{ "{{" }} .resyncInterval {{ "}}" }}
+            {{ "{{" }}- end }}
+            {{- end }}
+          ports:
+            {{- if .Values.cdc.metrics.enabled }}
+            - name: metrics
+              containerPort: {{ .Values.cdc.metrics.port }}
+              protocol: TCP
+            {{- end }}
+          {{- with .Values.cdc.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.cdc.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          # Per-Kind override (spec.controller.resources) when core-provider injects .resources;
+          # otherwise the chart-global cdc.resources default (rendered as JSON — valid YAML — so the
+          # runtime layer can fall back to it without a nested block). Unset renders identically to
+          # the prior chart-global behavior.
+          resources: {{ "{{" }} if .resources }}{{ "{{" }} .resources }}{{ "{{" }} else }}{{ .Values.cdc.resources | toJson }}{{ "{{" }} end }}
+          volumeMounts:
+          {{ "{{" }}- if .api_ref_name {{ "}}" }}
+            # Projected authn-audience ServiceAccount token, mounted only when the
+            # CompositionDefinition declares an apiRef. The CDC exchanges it for a service JWT
+            # (authn /serviceaccount/login) to resolve the RESTAction .api status source.
+            - name: authn-serviceaccount-token
+              mountPath: /var/run/secrets/krateo.io/serviceaccount
+              readOnly: true
+          {{ "{{" }}- end {{ "}}" }}
+          {{- with .Values.cdc.volumeMounts }}
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+      {{ "{{" }}- if .api_ref_name {{ "}}" }}
+        - name: authn-serviceaccount-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  audience: authn
+                  expirationSeconds: 3600
+      {{ "{{" }}- end {{ "}}" }}
+      {{- with .Values.cdc.volumes }}
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.cdc.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.cdc.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.cdc.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

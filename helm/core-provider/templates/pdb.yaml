@@ -1,0 +1,36 @@
+{{- /*
+PodDisruptionBudgets, only rendered when enabled AND the component runs more than one replica
+(a PDB on a single replica would block every voluntary node drain). core-provider's replica count
+depends on whether its HPA owns scaling.
+*/ -}}
+{{- $cpReplicas := .Values.replicaCount }}
+{{- if .Values.autoscaling.enabled }}{{ $cpReplicas = .Values.autoscaling.minReplicas }}{{ end }}
+{{- if and .Values.podDisruptionBudget.enabled (gt (int $cpReplicas) 1) }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "core-provider.fullname" . }}
+  labels:
+    {{- include "core-provider.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "core-provider.selectorLabels" . | nindent 6 }}
+{{- end }}
+{{- $ciReplicas := .Values.chartInspector.replicaCount }}
+{{- if .Values.chartInspector.autoscaling.enabled }}{{ $ciReplicas = .Values.chartInspector.autoscaling.minReplicas }}{{ end }}
+{{- if and .Values.chartInspector.podDisruptionBudget.enabled (gt (int $ciReplicas) 1) }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "chart-inspector.fullname" . }}
+  labels:
+    {{- include "chart-inspector.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.chartInspector.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "chart-inspector.selectorLabels" . | nindent 6 }}
+{{- end }}

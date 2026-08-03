@@ -1,0 +1,145 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: demo-system
+---
+kind: ServiceAccount
+apiVersion: v1
+metadata:
+  name: snowplow
+  namespace: demo-system
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: jq-custom-modules
+  namespace: demo-system
+data: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: snowplow
+  namespace: demo-system
+spec:
+  selector:
+    app: snowplow
+  type: NodePort
+  ports:
+  - name: http
+    port: 8081
+    targetPort: http
+    protocol: TCP
+    nodePort: 30081
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: snowplow
+  namespace: demo-system
+  labels:
+    app: snowplow
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: snowplow
+  template:
+    metadata:
+      labels:
+        app: snowplow
+    spec:
+      serviceAccountName: snowplow
+      volumes:
+      - name: jq-modules
+        configMap:
+          name: jq-custom-modules
+      containers:
+      - name: snowplow
+        image: snowplow:e2e
+        imagePullPolicy: Never
+        args:
+          - --debug=false
+          - --blizzard=false
+          - --port=8081
+          - --authn-namespace=demo-system
+          - --jwt-sign-key=AbbraCadabbra
+          - --pretty-log=false
+          - --jq-modules-path=/jq-modules
+        ports:
+        - name: http
+          containerPort: 8081
+        volumeMounts:
+        - name: jq-modules
+          mountPath: /jq-modules
+          readOnly: true
+---
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: snowplow
+rules:
+- apiGroups:
+  - core.krateo.io
+  resources:
+  - compositiondefinitions
+  - schemadefinitions
+  verbs:
+  - get
+  - list
+- apiGroups:
+  - templates.krateo.io
+  resources:
+  - "*"
+  verbs:
+  - get
+  - list
+- apiGroups:
+  - apiextensions.k8s.io
+  resources:
+  - customresourcedefinitions
+  verbs:
+  - get
+  - list
+- apiGroups:
+  - ""
+  resources:
+  - namespaces
+  - configmaps
+  - secrets
+  verbs:
+  - get
+  - list
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
+  - roles
+  - rolebindings
+  - clusterroles
+  - clusterrolebindings
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - authorization.k8s.io
+  resources:
+  - subjectaccessreviews
+  verbs:
+  - create
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: snowplow
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: snowplow
+subjects:
+- kind: ServiceAccount
+  name: snowplow
+  namespace: demo-system

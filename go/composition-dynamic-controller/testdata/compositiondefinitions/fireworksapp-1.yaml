@@ -1,0 +1,13 @@
+apiVersion: core.krateo.io/v1alpha1
+kind: CompositionDefinition
+metadata:
+  name: fireworks-app-1
+  namespace: demo-system
+spec:
+  chart:
+    repo: fireworks-app
+    url: https://charts.krateo.io
+    version: 1.1.11
+status:
+  apiVersion: composition.krateo.io/v1-1-11
+  kind: FireworksApp

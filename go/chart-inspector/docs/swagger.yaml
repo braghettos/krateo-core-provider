@@ -1,0 +1,88 @@
+basePath: /
+definitions:
+  resources.Resource:
+    properties:
+      group:
+        type: string
+      name:
+        type: string
+      namespace:
+        type: string
+      resource:
+        type: string
+      version:
+        type: string
+    type: object
+info:
+  contact: {}
+  description: This is the API for the Chart Inspector service. It provides endpoints
+    for inspecting Helm charts.
+  title: Chart Inspector API
+  version: "1.0"
+paths:
+  /resources:
+    get:
+      description: Get Helm chart resources
+      operationId: get-chart-resources
+      parameters:
+      - description: Composition name
+        in: query
+        name: compositionName
+        required: true
+        type: string
+      - description: Composition namespace
+        in: query
+        name: compositionNamespace
+        required: true
+        type: string
+      - description: Composition definition name
+        in: query
+        name: compositionDefinitionName
+        required: true
+        type: string
+      - description: Composition definition namespace
+        in: query
+        name: compositionDefinitionNamespace
+        required: true
+        type: string
+      - default: core.krateo.io
+        description: Composition definition group
+        in: query
+        name: compositionDefinitionGroup
+        type: string
+      - default: v1alpha1
+        description: Composition definition version
+        in: query
+        name: compositionDefinitionVersion
+        type: string
+      - default: compositiondefinitions
+        description: Composition definition resource name
+        in: query
+        name: compositionDefinitionResource
+        type: string
+      - default: composition.krateo.io
+        description: Composition group
+        in: query
+        name: compositionGroup
+        type: string
+      - description: Composition version
+        in: query
+        name: compositionVersion
+        required: true
+        type: string
+      - description: Composition resource name
+        in: query
+        name: compositionResource
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/resources.Resource'
+            type: array
+      summary: Get Helm chart resources
+swagger: "2.0"

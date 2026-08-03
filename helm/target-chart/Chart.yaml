@@ -1,0 +1,22 @@
+apiVersion: v2
+name: core-provider-target
+description: >
+  Prerequisites for using a cluster as a Krateo core-provider remote deployment target:
+  the composition-version MutatingAdmissionPolicy. Install into every cluster referenced
+  by a KubernetesTarget. Requires Kubernetes >= 1.36.
+type: application
+
+# This is the chart version. This version number should be incremented each time you make changes
+# to the chart and its templates, including the app version.
+# Versions are expected to follow Semantic Versioning (https://semver.org/)
+version: CHART_VERSION
+
+home: https://krateo.io
+icon: https://github.com/krateoplatformops/krateo/blob/main/docs/media/logo.svg
+keywords:
+  - krateo
+  - platformops
+  - core-provider
+  - target
+sources:
+  - https://github.com/krateo-platformops/core-provider/tree/SOURCE_REF

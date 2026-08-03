@@ -1,0 +1,15 @@
+apiVersion: composition.krateo.io/v0-1-0
+kind: FocusDataPresentationAzure4
+metadata:
+  name: finops-example-azure-vm-pricing
+  namespace: krateo-system
+  labels:
+    krateo.io/release-name: focus-1
+spec:
+  annotationKey: krateo-finops-focus-resource
+  filter: serviceName eq 'Virtual Machines' and skuId eq 'DZH318Z0K9JH/00KX' and armRegionName eq 'westus3' and type eq 'Consumption'
+  scraperConfig:
+    tableName: pricing_table
+    scraperDatabaseConfigRef: 
+      name: finops-database-handler
+      namespace: krateo-system

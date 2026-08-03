@@ -1,0 +1,26 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{`{{ .resource }}`}}-{{`{{ .apiVersion }}`}}
+  namespace: {{`{{ .namespace }}`}}
+rules:
+# The cdc must manage Jobs in its namespace: the installer umbrella renders its own
+# teardown-hook Jobs into the self-composition release, and `helm uninstall` of that release
+# (on teardown) must be able to delete them. Without this, uninstall fails with
+# `jobs.batch "..." is forbidden` and the teardown deadlocks. Namespaced (least-privilege).
+- apiGroups: ["batch"]
+  resources: ["jobs"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+# The installer umbrella's compositions.yaml calls the `inst.lbip` helper, which does a Helm
+# `lookup "v1" "Service"` in its own namespace at render time to wire each frontend consumer's
+# config with the peer LoadBalancer IPs. That lookup executes as the cdc SA, so it needs services
+# read — otherwise every umbrella reconcile fails with `services is forbidden`. chart-inspector
+# cannot infer lookup permissions from rendered output (the looked-up Service is not a chart
+# resource), so grant it here on the GENERATED cdc Role. Because this is tied to the SA
+# core-provider actually creates (installers-v<served-version>), it is version-safe and replaces
+# the fragile bootstrap-time `installers-lbip-services` grant, which pinned services to
+# installers-v<chart-version> and chronically missed the running SA on a version bump. Namespaced,
+# read-only (least-privilege).
+- apiGroups: [""]
+  resources: ["services"]
+  verbs: ["get", "list", "watch"]

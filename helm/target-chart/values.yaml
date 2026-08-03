@@ -1,0 +1,3 @@
+# krateo-core-provider-target has no configurable values: it installs a single,
+# cluster-scoped MutatingAdmissionPolicy + Binding so that composition instances created
+# in this target cluster are stamped with the chart version they were written through.

@@ -1,0 +1,33 @@
+@startuml composition-dynamic-controller
+ 
+package composition-dynamic-controller {
+  component "Create" as create
+  component "Observe" as observe
+  component "Update" as update
+  component "Delete" as delete
+}
+
+package chart-inspector {
+  component "/resources" as resources
+}
+
+package helm-library {
+  component "Install" as install
+  component "Render" as render
+  component "Uninstall" as uninstall
+  component "Upgrade" as upgrade
+}
+
+observe -u-> resources
+create -u-> resources
+update -u-> resources
+delete -u-> resources
+
+create -d-> install
+update -d-> upgrade
+observe -d-> render
+delete -d-> uninstall
+
+
+
+@enduml
