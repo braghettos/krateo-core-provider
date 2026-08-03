@@ -1,8 +1,8 @@
 package pluralizer
 
 import (
-	"github.com/krateoplatformops/plumbing/cache"
-	"github.com/krateoplatformops/plumbing/kubeutil/plurals"
+	"github.com/krateo-platformops/plumbing/cache"
+	"github.com/krateo-platformops/plumbing/kubeutil/plurals"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 

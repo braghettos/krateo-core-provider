@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"time"
 
-	compositiondefinitionsv1alpha1 "github.com/krateoplatformops/core-provider/apis/compositiondefinitions/v1alpha1"
-	kubecli "github.com/krateoplatformops/core-provider/internal/tools/kube"
+	compositiondefinitionsv1alpha1 "github.com/krateo-platformops/core-provider/apis/compositiondefinitions/v1alpha1"
+	kubecli "github.com/krateo-platformops/core-provider/internal/tools/kube"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"

@@ -6,10 +6,10 @@ import (
 	"io"
 	"io/fs"
 
-	"github.com/krateoplatformops/core-provider/apis/compositiondefinitions/v1alpha1"
-	"github.com/krateoplatformops/core-provider/internal/tools/resolvers"
-	"github.com/krateoplatformops/core-provider/internal/tools/tgzfs"
-	"github.com/krateoplatformops/plumbing/helm/getter"
+	"github.com/krateo-platformops/core-provider/apis/compositiondefinitions/v1alpha1"
+	"github.com/krateo-platformops/core-provider/internal/tools/resolvers"
+	"github.com/krateo-platformops/core-provider/internal/tools/tgzfs"
+	"github.com/krateo-platformops/plumbing/helm/getter"
 	"k8s.io/client-go/dynamic"
 )
 

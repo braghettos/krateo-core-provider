@@ -1,7 +1,7 @@
 package kube
 
 import (
-	"github.com/krateoplatformops/plumbing/kubeutil/objectclient"
+	"github.com/krateo-platformops/plumbing/kubeutil/objectclient"
 )
 
 // ApplyOptions and UninstallOptions are aliases (not copies) of plumbing/kubeutil/objectclient's

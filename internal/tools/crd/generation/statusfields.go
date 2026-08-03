@@ -6,7 +6,7 @@ import (
 	"strings"
 
 	"github.com/itchyny/gojq"
-	"github.com/krateoplatformops/plumbing/jqutil"
+	"github.com/krateo-platformops/plumbing/jqutil"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 )
 

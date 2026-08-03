@@ -11,24 +11,24 @@ import (
 
 	"github.com/go-logr/logr"
 
-	"github.com/krateoplatformops/core-provider/internal/controllers/compositiondefinitions"
-	"github.com/krateoplatformops/core-provider/internal/controllers/compositionmirror"
-	"github.com/krateoplatformops/core-provider/internal/controllers/kubernetestargets"
-	"github.com/krateoplatformops/core-provider/internal/tools/pluralizer"
-	"github.com/krateoplatformops/plumbing/env"
-	"github.com/krateoplatformops/plumbing/ptr"
+	"github.com/krateo-platformops/core-provider/internal/controllers/compositiondefinitions"
+	"github.com/krateo-platformops/core-provider/internal/controllers/compositionmirror"
+	"github.com/krateo-platformops/core-provider/internal/controllers/kubernetestargets"
+	"github.com/krateo-platformops/core-provider/internal/tools/pluralizer"
+	"github.com/krateo-platformops/plumbing/env"
+	"github.com/krateo-platformops/plumbing/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/config"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	"github.com/krateoplatformops/core-provider/apis"
-	"github.com/krateoplatformops/provider-runtime/pkg/controller"
-	"github.com/krateoplatformops/provider-runtime/pkg/logging"
-	"github.com/krateoplatformops/provider-runtime/pkg/ratelimiter"
-	"github.com/krateoplatformops/provider-runtime/pkg/telemetry"
+	"github.com/krateo-platformops/core-provider/apis"
+	"github.com/krateo-platformops/provider-runtime/pkg/controller"
+	"github.com/krateo-platformops/provider-runtime/pkg/logging"
+	"github.com/krateo-platformops/provider-runtime/pkg/ratelimiter"
+	"github.com/krateo-platformops/provider-runtime/pkg/telemetry"
 
-	coretelemetry "github.com/krateoplatformops/core-provider/internal/tools/telemetry"
+	coretelemetry "github.com/krateo-platformops/core-provider/internal/tools/telemetry"
 	"github.com/stoewer/go-strcase"
 )
 

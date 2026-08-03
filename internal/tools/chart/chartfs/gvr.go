@@ -7,7 +7,7 @@ import (
 
 	"github.com/gobuffalo/flect"
 
-	"github.com/krateoplatformops/core-provider/internal/tools/strutil"
+	"github.com/krateo-platformops/core-provider/internal/tools/strutil"
 	"gopkg.in/yaml.v2"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )

@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	compositiondefinitionsv1alpha1 "github.com/krateoplatformops/core-provider/apis/compositiondefinitions/v1alpha1"
-	"github.com/krateoplatformops/core-provider/internal/tools/retry"
-	rtv1 "github.com/krateoplatformops/provider-runtime/apis/common/v1"
+	compositiondefinitionsv1alpha1 "github.com/krateo-platformops/core-provider/apis/compositiondefinitions/v1alpha1"
+	"github.com/krateo-platformops/core-provider/internal/tools/retry"
+	rtv1 "github.com/krateo-platformops/provider-runtime/apis/common/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"

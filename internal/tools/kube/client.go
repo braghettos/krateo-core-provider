@@ -3,7 +3,7 @@ package kube
 import (
 	"context"
 
-	"github.com/krateoplatformops/plumbing/kubeutil/objectclient"
+	"github.com/krateo-platformops/plumbing/kubeutil/objectclient"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"

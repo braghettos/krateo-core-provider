@@ -25,7 +25,7 @@ import (
 	"sigs.k8s.io/e2e-framework/support/kind"
 
 	// if you have e2e helpers; otherwise remove
-	xenv "github.com/krateoplatformops/plumbing/env"
+	xenv "github.com/krateo-platformops/plumbing/env"
 )
 
 var (

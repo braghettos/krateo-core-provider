@@ -8,11 +8,11 @@ import (
 	"os"
 	"testing"
 
-	rtv1 "github.com/krateoplatformops/provider-runtime/apis/common/v1"
+	rtv1 "github.com/krateo-platformops/provider-runtime/apis/common/v1"
 
-	"github.com/krateoplatformops/core-provider/apis/compositiondefinitions/v1alpha1"
-	"github.com/krateoplatformops/plumbing/e2e"
-	xenv "github.com/krateoplatformops/plumbing/env"
+	"github.com/krateo-platformops/core-provider/apis/compositiondefinitions/v1alpha1"
+	"github.com/krateo-platformops/plumbing/e2e"
+	xenv "github.com/krateo-platformops/plumbing/env"
 	"github.com/stretchr/testify/assert"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/discovery"

@@ -20,9 +20,9 @@ import (
 	"testing"
 	"time"
 
-	compositiondefinitionsv1alpha1 "github.com/krateoplatformops/core-provider/apis/compositiondefinitions/v1alpha1"
-	crdclient "github.com/krateoplatformops/core-provider/internal/tools/crd"
-	rtv1 "github.com/krateoplatformops/provider-runtime/apis/common/v1"
+	compositiondefinitionsv1alpha1 "github.com/krateo-platformops/core-provider/apis/compositiondefinitions/v1alpha1"
+	crdclient "github.com/krateo-platformops/core-provider/internal/tools/crd"
+	rtv1 "github.com/krateo-platformops/provider-runtime/apis/common/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"

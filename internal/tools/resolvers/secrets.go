@@ -3,8 +3,8 @@ package resolvers
 import (
 	"context"
 
-	"github.com/krateoplatformops/plumbing/kubeutil/secretref"
-	rtv1 "github.com/krateoplatformops/provider-runtime/apis/common/v1"
+	"github.com/krateo-platformops/plumbing/kubeutil/secretref"
+	rtv1 "github.com/krateo-platformops/provider-runtime/apis/common/v1"
 	"k8s.io/client-go/dynamic"
 )
 

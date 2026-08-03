@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/krateoplatformops/core-provider/internal/tools/objects"
+	"github.com/krateo-platformops/core-provider/internal/tools/objects"
 	"github.com/stretchr/testify/assert"
 	appsv1 "k8s.io/api/apps/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"

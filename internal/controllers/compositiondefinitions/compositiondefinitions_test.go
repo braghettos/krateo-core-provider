@@ -20,12 +20,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/krateoplatformops/plumbing/cache"
+	"github.com/krateo-platformops/plumbing/cache"
 
 	"github.com/go-logr/logr"
-	"github.com/krateoplatformops/provider-runtime/pkg/controller"
-	"github.com/krateoplatformops/provider-runtime/pkg/logging"
-	"github.com/krateoplatformops/provider-runtime/pkg/ratelimiter"
+	"github.com/krateo-platformops/provider-runtime/pkg/controller"
+	"github.com/krateo-platformops/provider-runtime/pkg/logging"
+	"github.com/krateo-platformops/provider-runtime/pkg/ratelimiter"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -34,12 +34,12 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	"github.com/krateoplatformops/core-provider/apis"
-	"github.com/krateoplatformops/core-provider/apis/compositiondefinitions/v1alpha1"
-	"github.com/krateoplatformops/core-provider/internal/tools/kube/watcher"
-	"github.com/krateoplatformops/plumbing/e2e"
-	xenv "github.com/krateoplatformops/plumbing/env"
-	rtv1 "github.com/krateoplatformops/provider-runtime/apis/common/v1"
+	"github.com/krateo-platformops/core-provider/apis"
+	"github.com/krateo-platformops/core-provider/apis/compositiondefinitions/v1alpha1"
+	"github.com/krateo-platformops/core-provider/internal/tools/kube/watcher"
+	"github.com/krateo-platformops/plumbing/e2e"
+	xenv "github.com/krateo-platformops/plumbing/env"
+	rtv1 "github.com/krateo-platformops/provider-runtime/apis/common/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/discovery"
@@ -702,7 +702,7 @@ type Info struct {
 //
 // Go package folders allow only underscore char ('_')
 // K8s CRD version allow only dash char ('-')
-// This version is taken from https://github.com/krateoplatformops/crdgen/blob/bf775894a752cc14d45d0b1f2a9dc080e0277517/internal/coders/support.go
+// This version is taken from https://github.com/krateo-platformops/crdgen/blob/bf775894a752cc14d45d0b1f2a9dc080e0277517/internal/coders/support.go
 func normalizeVersion(ver string, replaceChar rune) string {
 	ver = strings.ToLower(ver)
 

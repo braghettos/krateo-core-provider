@@ -3,7 +3,7 @@ package compositiondefinitions
 import (
 	"testing"
 
-	compositiondefinitionsv1alpha1 "github.com/krateoplatformops/core-provider/apis/compositiondefinitions/v1alpha1"
+	compositiondefinitionsv1alpha1 "github.com/krateo-platformops/core-provider/apis/compositiondefinitions/v1alpha1"
 )
 
 func TestStatusGVR(t *testing.T) {
