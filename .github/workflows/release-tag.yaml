@@ -25,7 +25,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        mod: [core-provider, composition-dynamic-controller, chart-inspector]
+        include:
+          - mod: core-provider
+            context: go/core-provider
+          - mod: composition-dynamic-controller
+            context: go/composition-dynamic-controller
+          - mod: chart-inspector
+            context: go
     permissions:
       contents: read
       packages: write
@@ -56,7 +62,7 @@ jobs:
       - name: Build and push (linux/amd64, linux/arm64)
         uses: docker/build-push-action@v7
         with:
-          context: go/${{ matrix.mod }}
+          context: ${{ matrix.context }}
           file: go/${{ matrix.mod }}/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
