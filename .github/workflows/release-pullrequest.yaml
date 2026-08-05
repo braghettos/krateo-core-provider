@@ -21,25 +21,32 @@ jobs:
       push: false
     secrets: inherit
 
-  go-checks:
-    # One reusable invocation per module (each has its own go.mod). CRD-drift runs only for
-    # core-provider, the only module with committed crds/ (make generate + git diff).
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - module: go/core-provider
-            crd_drift: true
-            test_args: "-race -tags=unit,integration -p 1 -timeout 30m -coverprofile=coverage.txt -covermode=atomic ./... -coverpkg=./..."
-          - module: go/composition-dynamic-controller
-            crd_drift: false
-            test_args: "-race -coverprofile=coverage.txt -covermode=atomic ./..."
-          - module: go/chart-inspector
-            crd_drift: false
-            test_args: "-race -coverprofile=coverage.txt -covermode=atomic ./..."
+  # One reusable invocation per module (each has its own go.mod). Explicit jobs rather than a
+  # matrix: reusable-workflow inputs are strictly typed, and a matrix value reaches `with:` as a
+  # templated string, which a typed `boolean` input (crd_drift) rejects at startup. Literal
+  # values sidestep that. CRD-drift (make generate + git diff crds/) runs only for core-provider,
+  # the sole module with committed crds/.
+  test-core-provider:
+    name: go-checks (core-provider)
     uses: krateo-platformops/.github/.github/workflows/component-go-checks.yaml@main
     with:
-      module: ${{ matrix.module }}
-      crd_drift: ${{ matrix.crd_drift }}
-      test_args: ${{ matrix.test_args }}
+      module: go/core-provider
+      crd_drift: true
+      test_args: "-race -tags=unit,integration -p 1 -timeout 30m -coverprofile=coverage.txt -covermode=atomic ./... -coverpkg=./..."
+    secrets: inherit
+
+  test-composition-dynamic-controller:
+    name: go-checks (composition-dynamic-controller)
+    uses: krateo-platformops/.github/.github/workflows/component-go-checks.yaml@main
+    with:
+      module: go/composition-dynamic-controller
+      test_args: "-race -coverprofile=coverage.txt -covermode=atomic ./..."
+    secrets: inherit
+
+  test-chart-inspector:
+    name: go-checks (chart-inspector)
+    uses: krateo-platformops/.github/.github/workflows/component-go-checks.yaml@main
+    with:
+      module: go/chart-inspector
+      test_args: "-race -coverprofile=coverage.txt -covermode=atomic ./..."
     secrets: inherit
