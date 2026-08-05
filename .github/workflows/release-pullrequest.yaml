@@ -6,47 +6,45 @@ on:
       - main
 
 # core-provider is a Go MONOREPO: three independent modules each with its own go.mod +
-# Dockerfile (go/core-provider, go/composition-dynamic-controller, go/chart-inspector). The
-# previous inline jobs ran from the repo ROOT and failed on every PR ("open Dockerfile: no
-# such file or directory" / "go.mod not found"). This uses the same folded-aware reusables as
-# release-tag.yaml so folded and monorepo repos share one CI shape.
+# Dockerfile under go/<module>/. The previous inline jobs ran from the repo ROOT and failed on
+# every PR ("open Dockerfile: no such file or directory" / "go.mod not found"). This mirrors the
+# folded-aware reusables used by release-tag.yaml (and the same shape as the other krateo-* Go
+# repos, e.g. authn) so folded and monorepo repos share one CI shape — just one build job per
+# module list, and one component-go-checks per module.
 jobs:
   build:
-    # Validate all three images build multi-platform, WITHOUT pushing. Same modules list as
-    # release-tag.yaml; chart-inspector builds from the shared `go` context (its Dockerfile does
-    # `COPY . .` then `WORKDIR /src/chart-inspector`), so its dockerfile path is explicit.
+    # Validate all three images build multi-platform, WITHOUT pushing. chart-inspector builds from
+    # the shared `go` context (its Dockerfile does `COPY . .` then `WORKDIR /src/chart-inspector`),
+    # so its dockerfile path is explicit. permissions match authn's build job — the reusable
+    # requests packages:write, so the caller must grant it or the run fails at startup.
     uses: krateo-platformops/.github/.github/workflows/component-image-build.yaml@main
+    permissions:
+      contents: read
+      packages: write
     with:
       modules: '[{"mod":"core-provider","context":"go/core-provider"},{"mod":"composition-dynamic-controller","context":"go/composition-dynamic-controller"},{"mod":"chart-inspector","context":"go","dockerfile":"go/chart-inspector/Dockerfile"}]'
       push: false
-    secrets: inherit
 
-  # One reusable invocation per module (each has its own go.mod). Explicit jobs rather than a
-  # matrix: reusable-workflow inputs are strictly typed, and a matrix value reaches `with:` as a
-  # templated string, which a typed `boolean` input (crd_drift) rejects at startup. Literal
-  # values sidestep that. CRD-drift (make generate + git diff crds/) runs only for core-provider,
-  # the sole module with committed crds/.
-  test-core-provider:
-    name: go-checks (core-provider)
+  checks-core-provider:
+    # CRD-drift (make generate + git diff crds/) runs only here — core-provider is the sole module
+    # with committed crds/. Preserves its existing test flags.
     uses: krateo-platformops/.github/.github/workflows/component-go-checks.yaml@main
     with:
       module: go/core-provider
       crd_drift: true
-      test_args: "-race -tags=unit,integration -p 1 -timeout 30m -coverprofile=coverage.txt -covermode=atomic ./... -coverpkg=./..."
+      test_args: -race -tags=unit,integration -p 1 -timeout 30m -coverprofile=coverage.txt -covermode=atomic ./... -coverpkg=./...
     secrets: inherit
 
-  test-composition-dynamic-controller:
-    name: go-checks (composition-dynamic-controller)
+  checks-composition-dynamic-controller:
     uses: krateo-platformops/.github/.github/workflows/component-go-checks.yaml@main
     with:
       module: go/composition-dynamic-controller
-      test_args: "-race -coverprofile=coverage.txt -covermode=atomic ./..."
+      test_args: -race -coverprofile=coverage.txt -covermode=atomic ./...
     secrets: inherit
 
-  test-chart-inspector:
-    name: go-checks (chart-inspector)
+  checks-chart-inspector:
     uses: krateo-platformops/.github/.github/workflows/component-go-checks.yaml@main
     with:
       module: go/chart-inspector
-      test_args: "-race -coverprofile=coverage.txt -covermode=atomic ./..."
+      test_args: -race -coverprofile=coverage.txt -covermode=atomic ./...
     secrets: inherit
