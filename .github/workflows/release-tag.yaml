@@ -22,7 +22,7 @@ jobs:
       contents: read
       packages: write
     with:
-      modules: '[{"mod":"core-provider","context":"go/core-provider"},{"mod":"composition-dynamic-controller","context":"go/composition-dynamic-controller"},{"mod":"chart-inspector","context":"go"}]'
+      modules: '[{"mod":"core-provider","context":"go/core-provider"},{"mod":"composition-dynamic-controller","context":"go/composition-dynamic-controller"},{"mod":"chart-inspector","context":"go","dockerfile":"go/chart-inspector/Dockerfile"}]'
   crds:
     name: Generate & publish crds-subchart
     runs-on: ubuntu-latest
