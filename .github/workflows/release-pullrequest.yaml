@@ -5,92 +5,41 @@ on:
     branches:
       - main
 
-env:
-  GHCR_REPO: ghcr.io/${{ github.repository }}
-
+# core-provider is a Go MONOREPO: three independent modules each with its own go.mod +
+# Dockerfile (go/core-provider, go/composition-dynamic-controller, go/chart-inspector). The
+# previous inline jobs ran from the repo ROOT and failed on every PR ("open Dockerfile: no
+# such file or directory" / "go.mod not found"). This uses the same folded-aware reusables as
+# release-tag.yaml so folded and monorepo repos share one CI shape.
 jobs:
   build:
-    name: Build and Push
+    # Validate all three images build multi-platform, WITHOUT pushing. Same modules list as
+    # release-tag.yaml; chart-inspector builds from the shared `go` context (its Dockerfile does
+    # `COPY . .` then `WORKDIR /src/chart-inspector`), so its dockerfile path is explicit.
+    uses: krateo-platformops/.github/.github/workflows/component-image-build.yaml@main
+    with:
+      modules: '[{"mod":"core-provider","context":"go/core-provider"},{"mod":"composition-dynamic-controller","context":"go/composition-dynamic-controller"},{"mod":"chart-inspector","context":"go","dockerfile":"go/chart-inspector/Dockerfile"}]'
+      push: false
+    secrets: inherit
+
+  go-checks:
+    # One reusable invocation per module (each has its own go.mod). CRD-drift runs only for
+    # core-provider, the only module with committed crds/ (make generate + git diff).
     strategy:
+      fail-fast: false
       matrix:
-        runner: [ubuntu-22.04-arm, ubuntu-22.04]
         include:
-          - runner: ubuntu-22.04-arm
-            platform: linux/arm64
-          - runner: ubuntu-22.04
-            platform: linux/amd64
-    runs-on: ${{ matrix.runner }}
-
-    permissions:
-      contents: read
-      packages: write
-
-    steps:
-      - name: Prepare
-        run: |
-          platform=${{ matrix.platform }}
-          echo "PLATFORM_PAIR=${platform//\//-}" >> $GITHUB_ENV
-
-      - name: Docker meta
-        id: meta
-        uses: docker/metadata-action@v6
-        with:
-          images: ${{ env.GHCR_REPO }}
-
-      - name: Login to GHCR
-        uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.repository_owner }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-        with:
-          # PR validation builds a single NATIVE platform per runner and never pushes, so use the
-          # daemon's built-in BuildKit (docker driver) instead of the docker-container driver. The
-          # container driver boots buildkit by pulling moby/buildkit from Docker Hub, which
-          # intermittently times out on hosted runners (anonymous Docker Hub rate limit) and was
-          # failing every release-pullrequest run. The docker driver needs no such pull.
-          driver: docker
-
-      - name: Build and NOT push
-        id: build
-        uses: docker/build-push-action@v7
-        with:
-          # native to the runner (driver: docker builds the host arch); no cross-build needed
-          push: false
-          labels: ${{ steps.meta.outputs.labels }}
-
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
-        with:
-          go-version: 'stable'
-      - name: Gather dependencies
-        run: go mod download
-      - name: Run coverage
-        run: go test -race -tags=unit,integration -p 1 -timeout 30m -coverprofile=coverage.txt -covermode=atomic ./... -coverpkg=./...
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v6
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-
-  crds-drift:
-    name: CRD drift guard
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
-        with:
-          go-version: 'stable'
-      - name: Regenerate CRDs
-        run: go generate ./...
-      - name: Fail if committed CRDs are out of date
-        run: |
-          # The release-tag crds job publishes ./crds to the chart repo's crds-subchart.
-          # Committed CRDs must match a fresh controller-gen run, or the chart would drift.
-          git diff --exit-code crds/ \
-            || { echo "::error::./crds is out of date. Run 'go generate ./...' and commit the result."; exit 1; }
+          - module: go/core-provider
+            crd_drift: true
+            test_args: "-race -tags=unit,integration -p 1 -timeout 30m -coverprofile=coverage.txt -covermode=atomic ./... -coverpkg=./..."
+          - module: go/composition-dynamic-controller
+            crd_drift: false
+            test_args: "-race -coverprofile=coverage.txt -covermode=atomic ./..."
+          - module: go/chart-inspector
+            crd_drift: false
+            test_args: "-race -coverprofile=coverage.txt -covermode=atomic ./..."
+    uses: krateo-platformops/.github/.github/workflows/component-go-checks.yaml@main
+    with:
+      module: ${{ matrix.module }}
+      crd_drift: ${{ matrix.crd_drift }}
+      test_args: ${{ matrix.test_args }}
+    secrets: inherit
