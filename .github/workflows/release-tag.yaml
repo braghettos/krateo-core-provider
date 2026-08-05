@@ -17,23 +17,12 @@ on:
 
 jobs:
   build:
-    strategy:
-      matrix:
-        include:
-          - mod: core-provider
-            context: go/core-provider
-          - mod: composition-dynamic-controller
-            context: go/composition-dynamic-controller
-          - mod: chart-inspector
-            context: go
     uses: krateo-platformops/.github/.github/workflows/component-image-build.yaml@main
     permissions:
       contents: read
       packages: write
     with:
-      context: ${{ matrix.context }}
-      image: ghcr.io/${{ github.repository_owner }}/${{ matrix.mod }}
-
+      modules: '[{"mod":"core-provider","context":"go/core-provider"},{"mod":"composition-dynamic-controller","context":"go/composition-dynamic-controller"},{"mod":"chart-inspector","context":"go"}]'
   crds:
     name: Generate & publish crds-subchart
     runs-on: ubuntu-latest
