@@ -27,12 +27,15 @@ jobs:
 
   checks-core-provider:
     # CRD-drift (make generate + git diff crds/) runs only here — core-provider is the sole module
-    # with committed crds/. Preserves its existing test flags.
+    # with committed crds/. Runs the UNIT suite: the `integration`-tagged tests spin up a real kind
+    # cluster / pull from Docker Hub (e2e-framework) and are unsuitable for a fast per-PR check —
+    # they belong in a dedicated integration workflow. (There are no `unit`-tagged files, so the old
+    # `-tags=unit,integration` only added the heavy integration build; dropping it runs all unit tests.)
     uses: krateo-platformops/.github/.github/workflows/component-go-checks.yaml@main
     with:
       module: go/core-provider
       crd_drift: true
-      test_args: -race -tags=unit,integration -p 1 -timeout 30m -coverprofile=coverage.txt -covermode=atomic ./... -coverpkg=./...
+      test_args: -race -coverprofile=coverage.txt -covermode=atomic ./...
     secrets: inherit
 
   checks-composition-dynamic-controller:
