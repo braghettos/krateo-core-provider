@@ -158,7 +158,10 @@ chartInspector:
     registry: ghcr.io
     repository: krateo-platformops/chart-inspector
     pullPolicy: IfNotPresent
-    tag: "2.12.2"
+    # Tracks the chart appVersion (empty tag → krateo.image defaultTag = .Chart.AppVersion, see
+    # templates/chart-inspector/deployment.yaml), so each release ships the matching chart-inspector
+    # build; set an explicit tag to pin a known-good build.
+    tag: ""
   # chart-inspector is stateless (renders manifests to compute RBAC). Its outage wedges installs on
   # core-provider's ~30s /rbac timeout, so HA is valuable — but the platform ships a SINGLE replica by
   # default to keep the committed footprint small (see FOOTPRINT NOTE); opt into HA where you need it.
@@ -241,17 +244,17 @@ cdc:
     registry: ghcr.io
     repository: krateo-platformops/composition-dynamic-controller
     pullPolicy: IfNotPresent
-    # 1.3.14: Observe no longer reports Ready=True "Composition is up-to-date" while a helm
-    # operation is still pending — it sets Ready=False/PendingHelmOperation naming the release
-    # status and how long it has been pending. Previously a spec change queued behind the pending
-    # lock sat unapplied for up to pendingOperationGrace (5m) while the CR asserted convergence,
-    # so anything gating on Ready proceeded on a false premise. Reconcile behaviour is unchanged
-    # (the ExternalObservation is the same); recovery past the grace period still rolls the stale
-    # lock back and applies the change. Verified end-to-end on kind.
-    # 1.3.15: status writes retry on optimistic-concurrency conflict (updateStatusWithRetry) — a
-    # benign "object has been modified" 409 during a GVK-migration handover no longer wedges the
-    # composition Ready=False until a manual controller restart (krateo-core-provider#57, fix #1).
-    tag: "2.12.2"
+    # The cdc (composition-dynamic-controller) image tag TRACKS the chart appVersion: leave this
+    # empty so the asset's krateo.image defaultTag falls back to .Chart.AppVersion (see
+    # assets/cdc/deployment.yaml). Every core-provider release then ships the matching cdc build,
+    # and a cdc code fix goes live with the engine bump — no separate literal pin to remember.
+    # History: cdc was previously pinned to a known-good literal, decoupled from the engine
+    # (krateo-core-provider#57). That decoupling had a sharp edge: a cdc fix built by a release did
+    # NOT deploy with it, because the chart kept rendering the old pinned tag. That is exactly how
+    # the side-effect-free-Observe fix (#67, which self-heals the external-create wedge) was built
+    # into cdc 2.12.3 yet the 2.12.3 chart still deployed cdc 2.12.2. Version-locking closes the gap.
+    # To hold cdc back to a specific build (e.g. reverting a regression), set an explicit tag here.
+    tag: ""
   replicaCount: 1
   # workers / resyncInterval: OPTIONAL fleet-wide defaults for every CDC's reconcile concurrency and
   # resync interval. Leave unset (the default) for per-Kind opt-in only, via a CompositionDefinition's
