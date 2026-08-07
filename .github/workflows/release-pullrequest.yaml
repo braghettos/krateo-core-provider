@@ -51,3 +51,8 @@ jobs:
       module: go/chart-inspector
       test_args: -race -coverprofile=coverage.txt -covermode=atomic ./...
     secrets: inherit
+
+  lint-docs:
+    # THE canonical documentation-conformance check (the Krateo Documentation Standard):
+    # invariant core file set, OKF frontmatter, resolvable links, dead-org ban.
+    uses: krateo-platformops/.github/.github/workflows/lint-docs.yaml@main
