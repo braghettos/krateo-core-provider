@@ -41,9 +41,14 @@ see the history note in `helm/core-provider/values.yaml`).
      (chart-inspector builds from the shared `go/` context — its Dockerfile copies
      the whole tree.)
    - [`release-oci.yaml`](../.github/workflows/release-oci.yaml) (the canonical
-     byte-identical org workflow) substitutes the `Chart.yaml` placeholders
-     (`CHART_VERSION`/`APP_VERSION` → the tag), packages and pushes →
-     `oci://ghcr.io/krateo-platformops/charts/core-provider:X.Y.Z`.
+     byte-identical org workflow) discovers **every first-class chart under
+     `helm/`**, substitutes the `Chart.yaml` placeholders
+     (`CHART_VERSION`/`APP_VERSION` → the tag), packages and pushes to
+     `oci://ghcr.io/krateo-platformops/charts/`: `core-provider:X.Y.Z`,
+     `core-provider-target:X.Y.Z` (the remote-target prerequisites chart,
+     `helm/target-chart/`), and `core-provider-crds` at its own literal pin
+     (`helm/core-provider-crds/` — no placeholders, so it republishes unchanged
+     until its version is bumped).
 
 4. **Verify** the artifacts pair up:
 
@@ -60,8 +65,10 @@ see the history note in `helm/core-provider/values.yaml`).
 
 The two owned CRDs are generated from the Go types (`make generate` in
 `go/core-provider/`), committed under `go/core-provider/crds/`, and drift-gated in PR
-CI. The chart does **not** package them — the Krateo installer's bootstrap applies
-them (standalone installs `kubectl apply -f go/core-provider/crds/`), and the engine
+CI. The `core-provider` chart does **not** package them — the Krateo installer's
+bootstrap applies them (standalone installs: `kubectl apply -f go/core-provider/crds/`
+or the `core-provider-crds` chart, whose templates must be refreshed and whose
+version bumped by hand when the CRDs change), and the engine
 embeds the `CompositionDefinition` CRD for remote-target seeding
 (`internal/tools/deploy/remoteseed.go`). The old cross-repo `crds → chart-repo`
 publish job was dropped with the monorepo fold (#65). The generated *composition*

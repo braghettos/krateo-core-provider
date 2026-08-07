@@ -182,12 +182,13 @@ addition to CRDs, RBAC and Deployments.
 
 The projection is create-if-absent: if you prefer to manage the policy declaratively
 yourself (or already ship it via a chart), an existing policy in the target is left
-untouched. To install it explicitly, apply the `target-chart` from the core-provider chart
-repo into the target cluster:
+untouched. To install it explicitly, apply the `core-provider-target` chart (in this
+monorepo at [`helm/target-chart/`](../../helm/target-chart); published per release) into
+the target cluster:
 
 ```bash
-helm install krateo-core-provider-target oci://<registry>/krateo-core-provider-target \
-  --kube-context <target-cluster>
+helm install core-provider-target oci://ghcr.io/krateo-platformops/charts/core-provider-target \
+  --version <X.Y.Z> --kube-context <target-cluster>
 ```
 
 **Requirement:** the GA `MutatingAdmissionPolicy` API (`admissionregistration.k8s.io/v1`)

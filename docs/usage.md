@@ -33,7 +33,9 @@ compositions are reconciled — that flag belongs to the installer chart, not th
 ## Direct install (standalone)
 
 The chart does **not** package the two owned CRDs (the installer's bootstrap owns
-them); standalone, apply them first from this repo:
+them); standalone, apply them first — from this repo, or via the separately-versioned
+`core-provider-crds` chart also published from here (`helm/core-provider-crds/`,
+`oci://ghcr.io/krateo-platformops/charts/core-provider-crds`):
 
 ```sh
 kubectl apply -f go/core-provider/crds/
