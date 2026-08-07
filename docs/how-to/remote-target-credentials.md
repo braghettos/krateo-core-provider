@@ -1,3 +1,12 @@
+---
+type: Usage
+title: "How-to: credentials for remote deployment targets (ESO)"
+description: Wiring a KubernetesTarget's kubeconfig Secret with External Secrets Operator — the contract, target-side RBAC, and rotation recipes.
+resource: kubernetestargets.core.krateo.io
+tags: [how-to, multicluster, eso, credentials]
+timestamp: 2026-08-07T00:00:00Z
+---
+
 # How-to: credentials for remote deployment targets (with External Secrets Operator)
 
 When a `CompositionDefinition` references a remote cluster via
@@ -12,15 +21,17 @@ delegated to your secret manager via **External Secrets Operator (ESO)**.
 ## The contract
 
 ```yaml
-# Cluster-scoped: defines a remote cluster once; referenced by many CompositionDefinitions.
+# Namespaced: lives in the SAME namespace as every CompositionDefinition that
+# references it (targetRef is resolved in the referencing object's own namespace).
 apiVersion: core.krateo.io/v1alpha1
 kind: KubernetesTarget
 metadata:
   name: prod-eu
+  namespace: demo-system
 spec:
   kubeconfigRef:
     name: prod-eu-kubeconfig     # a native Secret in the management cluster
-    namespace: krateo-system
+    namespace: demo-system
     key: kubeconfig              # key holding a complete kubeconfig
 ---
 apiVersion: core.krateo.io/v1alpha1
@@ -33,11 +44,12 @@ spec:
     url: https://example.com/fireworks-app-0.1.0.tgz
   deploy:
     targetRef:
-      name: prod-eu             # the KubernetesTarget above
+      name: prod-eu             # the KubernetesTarget above, same namespace
 ```
 
 The Secret value under `key` must be a complete kubeconfig that authenticates to the
-target cluster. See **RBAC for the target identity** below for what it needs to be able
+target cluster (a token+`server`(+`ca.crt`) Secret shape — the form ESO mints for
+ServiceAccount tokens — is also accepted since #36). See **RBAC for the target identity** below for what it needs to be able
 to do.
 
 ## RBAC for the target identity
